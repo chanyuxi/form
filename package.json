@@ -1,0 +1,53 @@
+{
+  "name": "@chanyuxi/form",
+  "type": "module",
+  "version": "0.1.0",
+  "packageManager": "pnpm@12.10.1",
+  "description": "Headless, schema-driven form core",
+  "author": "",
+  "license": "ISC",
+  "keywords": [
+    "form",
+    "headless",
+    "schema"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test:runtime": "node --test test/runtime.test.mjs",
+    "test": "pnpm run build && pnpm run test:runtime",
+    "check": "pnpm run typecheck && pnpm run test"
+  },
+  "devDependencies": {
+    "@chanyuxi/eslint-waltz": "1.5.0",
+    "eslint": "10.10.0",
+    "eslint-config-flat-gitignore": "2.4.0",
+    "eslint-plugin-import-x": "4.17.1",
+    "eslint-plugin-jsonc": "3.4.2",
+    "eslint-plugin-perfectionist": "5.11.0",
+    "jiti": "2.7.0",
+    "jsonc-eslint-parser": "3.3.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "8.70.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.10.1",
+      "onFail": "download"
+    }
+  }
+}
