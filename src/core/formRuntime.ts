@@ -13,15 +13,17 @@ import type {
   FormState,
   ManualIssueInput,
   ResetOptions,
+  SubmitHandler,
+  SubmitResult,
   TransactionContext,
   ValidationResult,
   ValidationStatus,
 } from './types'
 
-import {
-  getAtPath,
-  isPlainRecord,
-} from './fieldPath'
+import { isPromiseLike } from '@chanyuxi/utils/async'
+import { isPlainObject } from '@chanyuxi/utils/object'
+import { getPath } from '@chanyuxi/utils/path'
+
 import { FormCoreError, formErrorCode } from './formError'
 import {
   aggregateValidationStatus,
@@ -32,11 +34,11 @@ import {
   hasValidator,
   indexIssues,
   invalidateValidation,
-  isThenable,
   makeInitialValidationStatuses,
 } from './validation'
 import {
   cloneContext,
+  cloneCoreValue,
   findChangedValuePaths,
   materializeValues,
   patchTopLevelValues,
@@ -50,8 +52,12 @@ interface InternalState<TValues extends object, TContext extends object> {
   readonly defaultValues: TValues
   readonly formEpoch: number
   readonly inputsRevision: number
+  readonly isSubmitSuccessful: boolean
+  readonly isSubmitted: boolean
+  readonly isSubmitting: boolean
   readonly manualIssues: readonly FormIssue[]
   readonly revision: number
+  readonly submitCount: number
   readonly touched: Readonly<Record<string, boolean>>
   readonly validatedFields: ReadonlySet<string>
   readonly validationIssues: readonly FormIssue[]
@@ -73,9 +79,13 @@ interface ValidationTicket {
 
 const emptyIssues: readonly FormIssue[] = Object.freeze([])
 
-export class FormRuntime<TValues extends object, TContext extends object>
-implements FormInstance<TValues, TContext> {
-  readonly schema: CoreSchema<TValues, TContext>
+export class FormRuntime<
+  TValues extends object,
+  TContext extends object,
+  TSubmitValues = TValues,
+>
+implements FormInstance<TValues, TContext, TSubmitValues> {
+  readonly schema: CoreSchema<TValues, TContext, TSubmitValues>
 
   get context(): DeepReadonly<TContext> {
     return this.stateValue.context as DeepReadonly<TContext>
@@ -97,7 +107,7 @@ implements FormInstance<TValues, TContext> {
     return this.stateValue.values as DeepReadonly<TValues>
   }
 
-  private readonly compiled: CompiledSchema<TValues, TContext>
+  private readonly compiled: CompiledSchema<TValues, TContext, TSubmitValues>
   private dirtyCount = 0
   private disposed = false
   private readonly fieldInstances = new Map<string, FieldInstance<TValues, FieldPath<TValues>, TContext>>()
@@ -110,13 +120,14 @@ implements FormInstance<TValues, TContext> {
   private readonly queuedWrites: (() => void)[] = []
   private snapshotValue: FormState<TValues>
   private stateValue: InternalState<TValues, TContext>
+  private submitController: AbortController | undefined
   private readonly subscriberErrors: unknown[] = []
   private transactionActive = false
 
   private readonly validationControllers = new Set<AbortController>()
 
   constructor(
-    compiled: CompiledSchema<TValues, TContext>,
+    compiled: CompiledSchema<TValues, TContext, TSubmitValues>,
     onSubscriberError: (error: AggregateError) => void,
     options?: CreateOptions<TValues, TContext>,
   ) {
@@ -137,8 +148,12 @@ implements FormInstance<TValues, TContext> {
       defaultValues,
       formEpoch: 0,
       inputsRevision: 0,
+      isSubmitSuccessful: false,
+      isSubmitted: false,
+      isSubmitting: false,
       manualIssues: [],
       revision: 0,
+      submitCount: 0,
       touched,
       validatedFields: new Set(),
       validationIssues: [],
@@ -223,6 +238,19 @@ implements FormInstance<TValues, TContext> {
       if (this.disposed) {
         return
       }
+      this.abortSubmit()
+      if (this.stateValue.isSubmitting) {
+        this.publish({
+          ...this.stateValue,
+          isSubmitSuccessful: false,
+          isSubmitting: false,
+        }, {
+          dirtyNames: new Set(),
+          fieldNames: new Set(),
+          observableChanged: true,
+          validationChanged: false,
+        })
+      }
       this.disposed = true
       this.abortValidations()
       this.formListeners.clear()
@@ -240,7 +268,7 @@ implements FormInstance<TValues, TContext> {
 
   getValue<TPath extends FieldPath<TValues>>(name: TPath): DeepReadonly<FieldValue<TValues, TPath>> {
     const field = this.requireField(name)
-    return getAtPath(this.stateValue.values, field.segments) as DeepReadonly<FieldValue<TValues, TPath>>
+    return getPath(this.stateValue.values, field.segments) as DeepReadonly<FieldValue<TValues, TPath>>
   }
 
   hasError(name?: FieldPath<TValues>): boolean {
@@ -271,7 +299,7 @@ implements FormInstance<TValues, TContext> {
   patchContext(patch: Partial<TContext>): void {
     this.ensureDirectWriteAllowed()
     this.executeWrite(() => {
-      if (!isPlainRecord(patch)) {
+      if (!isPlainObject(patch)) {
         throw new FormCoreError(formErrorCode.invalidValue, 'Context patch must be a plain object.')
       }
       const merged = { ...this.stateValue.context, ...patch }
@@ -304,6 +332,7 @@ implements FormInstance<TValues, TContext> {
   reset(options?: ResetOptions<TValues>): void {
     this.ensureDirectWriteAllowed()
     this.executeWrite(() => {
+      this.abortSubmit()
       this.abortValidations()
       const values = options === undefined
         ? this.stateValue.defaultValues
@@ -317,7 +346,11 @@ implements FormInstance<TValues, TContext> {
         defaultValues,
         formEpoch: this.stateValue.formEpoch + 1,
         inputsRevision: this.stateValue.inputsRevision + (inputsChanged ? 1 : 0),
+        isSubmitSuccessful: false,
+        isSubmitted: false,
+        isSubmitting: false,
         manualIssues: [],
+        submitCount: 0,
         touched: makeBooleanRecord(this.compiled.fields, false),
         validatedFields: new Set(),
         validationIssues: [],
@@ -332,8 +365,9 @@ implements FormInstance<TValues, TContext> {
     this.ensureDirectWriteAllowed()
     this.executeWrite(() => {
       const field = this.requireField(name)
+      this.abortSubmit()
       this.abortValidations()
-      const defaultValue = getAtPath(this.stateValue.defaultValues, field.segments)
+      const defaultValue = getPath(this.stateValue.defaultValues, field.segments)
       const values = replaceFieldValue(this.compiled, this.stateValue.values, name, defaultValue)
       const touched = { ...this.stateValue.touched, [field.name]: false }
       const invalidated = invalidateValidation(this.compiled.fields, this.stateValue)
@@ -427,6 +461,114 @@ implements FormInstance<TValues, TContext> {
     })
   }
 
+  async submit<TResult>(
+    handler: SubmitHandler<TSubmitValues, TResult>,
+  ): Promise<SubmitResult<TResult>> {
+    this.ensureWritable()
+    if (this.stateValue.isSubmitting) {
+      return { status: 'busy' }
+    }
+
+    const ticket: ValidationTicket = {
+      formEpoch: this.stateValue.formEpoch,
+      inputsRevision: this.stateValue.inputsRevision,
+    }
+    const values = this.stateValue.values
+    const context = this.stateValue.context
+    const controller = new AbortController()
+    this.submitController = controller
+    this.executeWrite(() => {
+      this.publish({
+        ...this.stateValue,
+        isSubmitSuccessful: false,
+        isSubmitting: true,
+        submitCount: this.stateValue.submitCount + 1,
+      }, {
+        dirtyNames: new Set(),
+        fieldNames: new Set(),
+        observableChanged: true,
+        validationChanged: false,
+      })
+    })
+
+    try {
+      const validation = await this.runValidation(this.compiled.fields)
+      if (validation.status === 'invalid') {
+        this.finishSubmit(true, false)
+        return { issues: validation.issues, status: 'invalid' }
+      }
+      if (validation.status === 'stale') {
+        this.finishSubmit(false, false)
+        return { status: 'stale' }
+      }
+      if (validation.status === 'aborted') {
+        this.finishSubmit(false, false)
+        return { status: 'aborted' }
+      }
+
+      const beforeTransform = this.submitTicketStatus(ticket, controller)
+      if (beforeTransform !== undefined) {
+        this.finishSubmit(false, false)
+        return { status: beforeTransform }
+      }
+
+      const transformed = this.compiled.transform({
+        context: context as DeepReadonly<TContext>,
+        values: values as DeepReadonly<TValues>,
+      })
+      if (isPromiseLike(transformed)) {
+        throw new FormCoreError(
+          formErrorCode.asyncTransformUnsupported,
+          'Schema transforms must be synchronous.',
+        )
+      }
+      const payload = cloneCoreValue(transformed, 'submitValues') as DeepReadonly<TSubmitValues>
+
+      const beforeHandler = this.submitTicketStatus(ticket, controller)
+      if (beforeHandler !== undefined) {
+        this.finishSubmit(false, false)
+        return { status: beforeHandler }
+      }
+
+      const result = await handler(payload, {
+        inputsRevision: ticket.inputsRevision,
+        signal: controller.signal,
+      })
+      if (
+        controller.signal.aborted
+        || this.disposed
+        || this.stateValue.formEpoch !== ticket.formEpoch
+      ) {
+        this.finishSubmit(false, false)
+        return { status: 'aborted' }
+      }
+
+      this.finishSubmit(true, true)
+      return {
+        inputsRevision: ticket.inputsRevision,
+        result,
+        status: 'success',
+      }
+    }
+    catch (error) {
+      if (
+        controller.signal.aborted
+        || this.disposed
+        || this.stateValue.formEpoch !== ticket.formEpoch
+      ) {
+        this.finishSubmit(false, false)
+        return { status: 'aborted' }
+      }
+      this.finishSubmit(true, false)
+      return { error, status: 'error' }
+    }
+    finally {
+      if (this.submitController === controller) {
+        this.submitController = undefined
+      }
+    }
+  }
+
   subscribe(listener: () => void): () => void {
     this.ensureWritable()
     this.formListeners.add(listener)
@@ -461,7 +603,7 @@ implements FormInstance<TValues, TContext> {
         getValue: (name) => {
           ensureOpen()
           const field = this.requireField(name)
-          return getAtPath(draftValues, field.segments) as never
+          return getPath(draftValues, field.segments) as never
         },
         patchValues: (patch) => {
           ensureOpen()
@@ -483,7 +625,7 @@ implements FormInstance<TValues, TContext> {
 
       try {
         const result = callback(transaction)
-        if (isThenable(result)) {
+        if (isPromiseLike(result)) {
           throw new FormCoreError(
             formErrorCode.asyncTransaction,
             'Transactions must use a synchronous callback.',
@@ -506,6 +648,11 @@ implements FormInstance<TValues, TContext> {
 
   validateField<TPath extends FieldPath<TValues>>(name: TPath): Promise<ValidationResult> {
     return this.runValidation([this.requireField(name)])
+  }
+
+  private abortSubmit(): void {
+    this.submitController?.abort()
+    this.submitController = undefined
   }
 
   private abortValidations(): void {
@@ -562,8 +709,8 @@ implements FormInstance<TValues, TContext> {
       const field = this.requireField(name)
       const wasDirty = dirtyFields[field.name] === true
       const isDirty = !Object.is(
-        getAtPath(state.values, field.segments),
-        getAtPath(state.defaultValues, field.segments),
+        getPath(state.values, field.segments),
+        getPath(state.defaultValues, field.segments),
       )
       dirtyFields[field.name] = isDirty
       if (wasDirty !== isDirty) {
@@ -578,7 +725,7 @@ implements FormInstance<TValues, TContext> {
   ): FieldInstance<TValues, TPath, TContext> {
     const readDefaultValue = () => {
       const field = this.requireField(name)
-      return getAtPath(this.stateValue.defaultValues, field.segments) as DeepReadonly<
+      return getPath(this.stateValue.defaultValues, field.segments) as DeepReadonly<
         FieldValue<TValues, TPath>
       >
     }
@@ -619,8 +766,8 @@ implements FormInstance<TValues, TContext> {
     const field = this.requireField(name)
     const baseStatus = state.validationStatuses[name] ?? 'unvalidated'
     const validationStatus = errors.length > 0 ? 'invalid' : baseStatus
-    const value = getAtPath(state.values, field.segments) as DeepReadonly<FieldValue<TValues, TPath>>
-    const defaultValue = getAtPath(state.defaultValues, field.segments) as DeepReadonly<
+    const value = getPath(state.values, field.segments) as DeepReadonly<FieldValue<TValues, TPath>>
+    const defaultValue = getPath(state.defaultValues, field.segments) as DeepReadonly<
       FieldValue<TValues, TPath>
     >
     return Object.freeze({
@@ -656,9 +803,13 @@ implements FormInstance<TValues, TContext> {
       dirtyFields,
       errors,
       isDirty: this.dirtyCount > 0,
+      isSubmitSuccessful: state.isSubmitSuccessful,
+      isSubmitted: state.isSubmitted,
+      isSubmitting: state.isSubmitting,
       isValid: validationStatus === 'valid',
       isValidating: validationStatus === 'validating',
       revision: state.revision,
+      submitCount: state.submitCount,
       touchedFields: state.touched as Readonly<Record<FieldPath<TValues>, boolean>>,
       validationStatus,
       values: state.values as DeepReadonly<TValues>,
@@ -699,6 +850,25 @@ implements FormInstance<TValues, TContext> {
         new AggregateError(errors, 'One or more form subscribers threw after a committed update.'),
       )
     }
+  }
+
+  private finishSubmit(submitted: boolean, successful: boolean): void {
+    if (this.disposed || !this.stateValue.isSubmitting) {
+      return
+    }
+    this.executeWrite(() => {
+      this.publish({
+        ...this.stateValue,
+        isSubmitSuccessful: successful,
+        isSubmitted: submitted || this.stateValue.isSubmitted,
+        isSubmitting: false,
+      }, {
+        dirtyNames: new Set(),
+        fieldNames: new Set(),
+        observableChanged: true,
+        validationChanged: false,
+      })
+    })
   }
 
   private getFieldSnapshot<TPath extends FieldPath<TValues>>(name: TPath): FieldState<TValues, TPath> {
@@ -853,10 +1023,10 @@ implements FormInstance<TValues, TContext> {
         const output = definition.validate({
           context: context as never,
           signal: controller.signal,
-          value: getAtPath(values, field.segments) as never,
+          value: getPath(values, field.segments) as never,
           values: values as never,
         })
-        if (isThenable(output)) {
+        if (isPromiseLike(output)) {
           throw new FormCoreError(
             formErrorCode.asyncValidationUnsupported,
             `Field "${field.name}" returned a Promise from its P0 validator.`,
@@ -946,6 +1116,23 @@ implements FormInstance<TValues, TContext> {
     })
   }
 
+  private submitTicketStatus(
+    ticket: ValidationTicket,
+    controller: AbortController,
+  ): 'aborted' | 'stale' | undefined {
+    if (
+      controller.signal.aborted
+      || this.disposed
+      || this.stateValue.formEpoch !== ticket.formEpoch
+    ) {
+      return 'aborted'
+    }
+    if (this.stateValue.inputsRevision !== ticket.inputsRevision) {
+      return 'stale'
+    }
+    return undefined
+  }
+
   private subscribeField<TPath extends FieldPath<TValues>>(name: TPath, listener: () => void): () => void {
     this.ensureWritable()
     const field = this.requireField(name)
@@ -997,6 +1184,10 @@ function hasObservableChange<TValues extends object, TContext extends object>(
   return !valuesEqual(fields, current.values, candidate.values)
     || !valuesEqual(fields, current.defaultValues, candidate.defaultValues)
     || current.context !== candidate.context
+    || current.isSubmitted !== candidate.isSubmitted
+    || current.isSubmitting !== candidate.isSubmitting
+    || current.isSubmitSuccessful !== candidate.isSubmitSuccessful
+    || current.submitCount !== candidate.submitCount
     || !recordsEqual(current.touched, candidate.touched)
     || !recordsEqual(current.validationStatuses, candidate.validationStatuses)
     || !issuesEqual(current.validationIssues, candidate.validationIssues)
@@ -1029,7 +1220,7 @@ function makeDirtyRecord<TValues extends object, TContext extends object>(
 ): Readonly<Record<FieldPath<TValues>, boolean>> {
   return Object.freeze(Object.fromEntries(fields.map(field => [
     field.name,
-    !Object.is(getAtPath(values, field.segments), getAtPath(defaults, field.segments)),
+    !Object.is(getPath(values, field.segments), getPath(defaults, field.segments)),
   ]))) as Readonly<Record<FieldPath<TValues>, boolean>>
 }
 

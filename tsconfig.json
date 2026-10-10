@@ -4,6 +4,9 @@
     "lib": ["ES2022", "DOM"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "paths": {
+      "@chanyuxi/form": ["./src/index.ts"]
+    },
     "types": ["node", "vitest/globals"],
     "strict": true,
     "exactOptionalPropertyTypes": true,

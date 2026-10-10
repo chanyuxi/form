@@ -24,6 +24,7 @@ const typeScriptCli = fileURLToPath(new URL('../node_modules/typescript/bin/tsc'
 await rm(distDirectory, { force: true, recursive: true })
 
 const bundle = await rollup({
+  external: id => id.startsWith('@chanyuxi/utils'),
   input: fileURLToPath(new URL('../src/index', import.meta.url)),
   plugins: [
     nodeResolve({ extensions: ['.mjs', '.js', '.json', '.ts'] }),

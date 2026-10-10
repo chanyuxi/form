@@ -128,3 +128,48 @@ baseForms.defineSchema<ProfileValues>()([
   { defaultValue: '', name: 'address.city' },
   { defaultValue: 0, name: 'address.zip' },
 ])
+
+const transformedSchema = baseForms.defineSchema<ProfileValues>()(
+  [
+    { defaultValue: '', name: 'name' },
+    { defaultValue: null, name: 'age' },
+    { defaultValue: '', name: 'address.city' },
+    { defaultValue: 0, name: 'address.zip' },
+  ],
+  {
+    transform: ({ values }) => ({ displayName: values.name }),
+  },
+)
+const transformedForm = baseForms.create(transformedSchema)
+void transformedForm.submit((payload, context) => {
+  const displayName: string = payload.displayName
+  const inputsRevision: number = context.inputsRevision
+  void displayName
+  void inputsRevision
+
+  // @ts-expect-error transformed payload does not expose input-only fields
+  void payload.age
+  return { saved: true }
+})
+
+const isSubmitting: boolean = transformedForm.state.isSubmitting
+const isSubmitted: boolean = transformedForm.state.isSubmitted
+const isSubmitSuccessful: boolean = transformedForm.state.isSubmitSuccessful
+const submitCount: number = transformedForm.state.submitCount
+void isSubmitting
+void isSubmitted
+void isSubmitSuccessful
+void submitCount
+
+baseForms.defineSchema<ProfileValues>()(
+  [
+    { defaultValue: '', name: 'name' },
+    { defaultValue: null, name: 'age' },
+    { defaultValue: '', name: 'address.city' },
+    { defaultValue: 0, name: 'address.zip' },
+  ],
+  {
+    // @ts-expect-error transforms are synchronous in the current Core
+    transform: async ({ values }) => ({ displayName: values.name }),
+  },
+)

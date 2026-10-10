@@ -13,6 +13,7 @@ interface DemoValues {
 
 const forms = configureForms<DemoContext>()
 
+debugger
 const schema = forms.defineSchema<DemoValues>()([
   {
     defaultValue: '',
@@ -71,8 +72,11 @@ minimumAgeInput.addEventListener('input', () => {
 
 formElement.addEventListener('submit', (event) => {
   event.preventDefault()
-  void form.validate().then((validation) => {
-    result.textContent = `validate() → ${validation.status}`
+  void form.submit(async (payload) => {
+    await new Promise(resolve => setTimeout(resolve, 300))
+    return payload
+  }).then((submission) => {
+    result.textContent = `submit() → ${submission.status}`
   })
 })
 

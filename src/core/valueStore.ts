@@ -1,23 +1,39 @@
 import type { CompiledField, CompiledSchema } from './formSchema'
 import type { FieldPath } from './types'
 
+import { cloneAndFreeze } from '@chanyuxi/utils/immutable'
+import { isPlainObject } from '@chanyuxi/utils/object'
+import {
+  getPath,
+  hasPath,
+  setPath,
+  updatePath,
+} from '@chanyuxi/utils/path'
+
 import {
   assertScalarValue,
-  cloneAndFreeze,
-  getAtPath,
-  hasAtPath,
-  isPlainRecord,
-  isRecord,
-  replaceAtPath,
-  setAtPath,
 } from './fieldPath'
 import { FormCoreError, formErrorCode } from './formError'
 
+export { shallowEqual as shallowObjectEqual } from '@chanyuxi/utils/object'
+
 export function cloneContext<TContext extends object>(context: TContext): TContext {
-  if (!isPlainRecord(context)) {
+  if (!isPlainObject(context)) {
     throw new FormCoreError(formErrorCode.invalidValue, 'Initial context must be a plain object.')
   }
-  return cloneAndFreeze(context, 'context')
+  return cloneCoreValue(context, 'context')
+}
+
+export function cloneCoreValue<TValue>(value: TValue, path: string): TValue {
+  try {
+    return cloneAndFreeze(value, path)
+  }
+  catch (error) {
+    if (error instanceof TypeError) {
+      throw new FormCoreError(formErrorCode.invalidValue, error.message, { cause: error })
+    }
+    throw error
+  }
 }
 
 export function findChangedValuePaths<TValues extends object, TContext extends object>(
@@ -27,7 +43,7 @@ export function findChangedValuePaths<TValues extends object, TContext extends o
 ): Set<string> {
   return new Set(
     fields.flatMap(field =>
-      Object.is(getAtPath(left, field.segments), getAtPath(right, field.segments))
+      Object.is(getPath(left, field.segments), getPath(right, field.segments))
         ? []
         : [field.name],
     ),
@@ -42,11 +58,11 @@ export function materializeValues<TValues extends object, TContext extends objec
   const target: Record<string, unknown> = {}
   for (const field of fields) {
     let value: unknown
-    if (source !== undefined && hasAtPath(source, field.segments)) {
-      value = getAtPath(source, field.segments)
+    if (source !== undefined && hasPath(source, field.segments)) {
+      value = getPath(source, field.segments)
     }
     else if (fallback !== undefined) {
-      value = getAtPath(fallback, field.segments)
+      value = getPath(fallback, field.segments)
     }
     else if (source === undefined) {
       value = field.defaultValue
@@ -55,17 +71,21 @@ export function materializeValues<TValues extends object, TContext extends objec
       throw new FormCoreError(formErrorCode.invalidValue, `Value for field "${field.name}" is missing.`)
     }
     assertScalarValue(value, field.name)
-    setAtPath(target, field.segments, value)
+    setPath(target, field.segments, value)
   }
-  return cloneAndFreeze(target) as TValues
+  return cloneCoreValue(target, 'values') as TValues
 }
 
-export function patchTopLevelValues<TValues extends object, TContext extends object>(
-  compiled: CompiledSchema<TValues, TContext>,
+export function patchTopLevelValues<
+  TValues extends object,
+  TContext extends object,
+  TSubmitValues,
+>(
+  compiled: CompiledSchema<TValues, TContext, TSubmitValues>,
   current: TValues,
   patch: Partial<TValues>,
 ): TValues {
-  if (!isRecord(patch)) {
+  if (!isPlainObject(patch)) {
     throw new FormCoreError(formErrorCode.invalidValue, 'Value patch must be a plain object.')
   }
   const roots = new Set(Object.keys(patch))
@@ -86,25 +106,29 @@ export function patchTopLevelValues<TValues extends object, TContext extends obj
   for (const field of compiled.fields) {
     const root = field.segments[0]
     if (root !== undefined && roots.has(root)) {
-      if (!hasAtPath(patch, field.segments)) {
+      if (!hasPath(patch, field.segments)) {
         throw new FormCoreError(
           formErrorCode.invalidValue,
           `Top-level patch for "${root}" must contain field "${field.name}".`,
         )
       }
-      const value = getAtPath(patch, field.segments)
+      const value = getPath(patch, field.segments)
       assertScalarValue(value, field.name)
-      setAtPath(target, field.segments, value)
+      setPath(target, field.segments, value)
     }
     else {
-      setAtPath(target, field.segments, getAtPath(current, field.segments))
+      setPath(target, field.segments, getPath(current, field.segments))
     }
   }
-  return cloneAndFreeze(target) as TValues
+  return cloneCoreValue(target, 'values') as TValues
 }
 
-export function replaceFieldValue<TValues extends object, TContext extends object>(
-  compiled: CompiledSchema<TValues, TContext>,
+export function replaceFieldValue<
+  TValues extends object,
+  TContext extends object,
+  TSubmitValues,
+>(
+  compiled: CompiledSchema<TValues, TContext, TSubmitValues>,
   current: TValues,
   name: FieldPath<TValues>,
   value: unknown,
@@ -117,19 +141,11 @@ export function replaceFieldValue<TValues extends object, TContext extends objec
     )
   }
   assertScalarValue(value, field.name)
-  if (Object.is(getAtPath(current, field.segments), value)) {
+  if (Object.is(getPath(current, field.segments), value)) {
     return current
   }
 
-  return replaceAtPath(current, field.segments, value)
-}
-
-export function shallowObjectEqual(left: object, right: object): boolean {
-  const leftRecord = left as Record<string, unknown>
-  const rightRecord = right as Record<string, unknown>
-  const leftKeys = Object.keys(leftRecord)
-  const rightKeys = Object.keys(rightRecord)
-  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.is(leftRecord[key], rightRecord[key]))
+  return updatePath(current, field.segments, value)
 }
 
 export function valuesEqual<TValues extends object, TContext extends object>(
@@ -138,6 +154,6 @@ export function valuesEqual<TValues extends object, TContext extends object>(
   right: TValues,
 ): boolean {
   return fields.every(field =>
-    Object.is(getAtPath(left, field.segments), getAtPath(right, field.segments)),
+    Object.is(getPath(left, field.segments), getPath(right, field.segments)),
   )
 }

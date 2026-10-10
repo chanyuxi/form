@@ -4,3 +4,6 @@ packages:
 allowBuilds:
   esbuild: true
   unrs-resolver: true
+
+minimumReleaseAgeExclude:
+  - '@chanyuxi/utils@2.0.0'

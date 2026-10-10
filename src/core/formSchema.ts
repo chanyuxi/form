@@ -3,6 +3,8 @@ import type {
   CoreSchema,
   FieldPath,
   ScalarValue,
+  SchemaOptions,
+  SchemaTransformContext,
 } from './types'
 
 import { assertScalarValue, parseFieldPath } from './fieldPath'
@@ -21,15 +23,24 @@ export interface CompiledField<
 export interface CompiledSchema<
   TValues extends object,
   TContext extends object,
+  TSubmitValues = TValues,
 > {
   readonly fieldMap: ReadonlyMap<string, CompiledField<TValues, TContext>>
   readonly fields: readonly CompiledField<TValues, TContext>[]
-  readonly schema: CoreSchema<TValues, TContext>
+  readonly schema: CoreSchema<TValues, TContext, TSubmitValues>
+  readonly transform: (
+    context: SchemaTransformContext<TValues, TContext>,
+  ) => TSubmitValues
 }
 
-export function compileSchema<TValues extends object, TContext extends object>(
+export function compileSchema<
+  TValues extends object,
+  TContext extends object,
+  TSubmitValues = TValues,
+>(
   input: readonly AnyCoreFieldDefinition<TValues, TContext>[],
-): CompiledSchema<TValues, TContext> {
+  options?: SchemaOptions<TValues, TContext, TSubmitValues>,
+): CompiledSchema<TValues, TContext, TSubmitValues> {
   if (!Array.isArray(input)) {
     throw new FormCoreError(
       formErrorCode.invalidValue,
@@ -111,7 +122,9 @@ export function compileSchema<TValues extends object, TContext extends object>(
   const normalizedFields = fields
   const schema = Object.freeze({
     fields: Object.freeze(normalizedFields.map(field => field.definition)),
-  }) as CoreSchema<TValues, TContext>
+  }) as CoreSchema<TValues, TContext, TSubmitValues>
+  const transform = options?.transform
+    ?? ((context: SchemaTransformContext<TValues, TContext>) => context.values as TSubmitValues)
 
-  return { fieldMap, fields: normalizedFields, schema }
+  return { fieldMap, fields: normalizedFields, schema, transform }
 }

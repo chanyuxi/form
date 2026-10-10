@@ -116,10 +116,15 @@ export interface ConfigureFormsOptions {
   readonly onSubscriberError?: (error: AggregateError) => void
 }
 
-export interface CoreSchema<TValues extends object, TContext extends object> {
+export interface CoreSchema<
+  TValues extends object,
+  TContext extends object,
+  TSubmitValues = TValues,
+> {
   readonly fields: readonly AnyCoreFieldDefinition<TValues, TContext>[]
   readonly [schemaBrand]: {
     readonly context: TContext
+    readonly submitValues: TSubmitValues
     readonly values: TValues
   }
 }
@@ -162,7 +167,11 @@ export interface FieldState<TValues extends object, TPath extends FieldPath<TVal
   readonly value: DeepReadonly<FieldValue<TValues, TPath>>
 }
 
-export interface FormInstance<TValues extends object, TContext extends object> {
+export interface FormInstance<
+  TValues extends object,
+  TContext extends object,
+  TSubmitValues = TValues,
+> {
   clearErrors(name?: FieldPath<TValues>, options?: ClearErrorsOptions): void
   readonly context: DeepReadonly<TContext>
   readonly defaultValues: DeepReadonly<TValues>
@@ -176,12 +185,15 @@ export interface FormInstance<TValues extends object, TContext extends object> {
   patchValues(patch: Partial<TValues>): void
   reset(options?: ResetOptions<TValues>): void
   resetField<TPath extends FieldPath<TValues>>(name: TPath): void
-  readonly schema: CoreSchema<TValues, TContext>
+  readonly schema: CoreSchema<TValues, TContext, TSubmitValues>
   setDefaultValues(patch: Partial<TValues>): void
   setError<TPath extends FieldPath<TValues>>(name: TPath, issue: ManualIssueInput): void
   setValue<TPath extends FieldPath<TValues>>(name: TPath, value: FieldValue<TValues, TPath>): void
   setValues(values: TValues): void
   readonly state: FormState<TValues>
+  submit<TResult>(
+    handler: SubmitHandler<TSubmitValues, TResult>,
+  ): Promise<SubmitResult<TResult>>
   subscribe(listener: () => void): () => void
   transaction(callback: (transaction: TransactionContext<TValues>) => void): void
   validate(): Promise<ValidationResult>
@@ -194,24 +206,30 @@ export interface FormState<TValues extends object> {
   readonly dirtyFields: Readonly<Record<FieldPath<TValues>, boolean>>
   readonly errors: readonly FormIssue[]
   readonly isDirty: boolean
+  readonly isSubmitSuccessful: boolean
+  readonly isSubmitted: boolean
+  readonly isSubmitting: boolean
   readonly isValid: boolean
   readonly isValidating: boolean
   readonly revision: number
+  readonly submitCount: number
   readonly touchedFields: Readonly<Record<FieldPath<TValues>, boolean>>
   readonly validationStatus: ValidationStatus
   readonly values: DeepReadonly<TValues>
 }
 
 export interface FormSystem<TContext extends object> {
-  create<TValues extends object>(
-    schema: CoreSchema<TValues, TContext>,
+  create<TValues extends object, TSubmitValues = TValues>(
+    schema: CoreSchema<TValues, TContext, TSubmitValues>,
     ...args: CreateArguments<TValues, TContext>
-  ): FormInstance<TValues, TContext>
+  ): FormInstance<TValues, TContext, TSubmitValues>
   defineSchema<TValues extends object>(): <
     const TFields extends readonly AnyCoreFieldDefinition<TValues, TContext>[],
+    TSubmitValues = TValues,
   >(
     fields: CompleteFieldDefinitions<TValues, TFields, TContext>,
-  ) => CoreSchema<TValues, TContext>
+    options?: SchemaOptions<TValues, TContext, TSubmitValues>,
+  ) => CoreSchema<TValues, TContext, TSubmitValues>
 }
 
 export interface ManualIssueInput {
@@ -223,6 +241,39 @@ export interface ResetOptions<TValues extends object> {
   readonly asDefaults?: boolean
   readonly values: TValues
 }
+
+export interface SchemaOptions<
+  TValues extends object,
+  TContext extends object,
+  TSubmitValues,
+> {
+  readonly transform: (
+    context: SchemaTransformContext<TValues, TContext>,
+  ) => TSubmitValues extends PromiseLike<unknown> ? never : TSubmitValues
+}
+
+export interface SchemaTransformContext<TValues extends object, TContext extends object> {
+  readonly context: DeepReadonly<TContext>
+  readonly values: DeepReadonly<TValues>
+}
+
+export type SubmitHandler<TSubmitValues, TResult> = (
+  values: DeepReadonly<TSubmitValues>,
+  context: SubmitHandlerContext,
+) => Promise<TResult> | TResult
+
+export interface SubmitHandlerContext {
+  readonly inputsRevision: number
+  readonly signal: AbortSignal
+}
+
+export type SubmitResult<TResult = unknown>
+  = | { readonly error: unknown, readonly status: 'error' }
+    | { readonly inputsRevision: number, readonly result: TResult, readonly status: 'success' }
+    | { readonly issues: readonly FormIssue[], readonly status: 'invalid' }
+    | { readonly status: 'aborted' }
+    | { readonly status: 'busy' }
+    | { readonly status: 'stale' }
 
 export interface TransactionContext<TValues extends object> {
   getValue<TPath extends FieldPath<TValues>>(name: TPath): DeepReadonly<FieldValue<TValues, TPath>>

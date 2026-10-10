@@ -1,5 +1,6 @@
 export const formErrorCode = Object.freeze({
   asyncTransaction: 'ASYNC_TRANSACTION',
+  asyncTransformUnsupported: 'ASYNC_TRANSFORM_UNSUPPORTED',
   asyncValidationUnsupported: 'ASYNC_VALIDATION_UNSUPPORTED',
   duplicateField: 'DUPLICATE_FIELD',
   fieldNotFound: 'FIELD_NOT_FOUND',

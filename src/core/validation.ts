@@ -115,12 +115,6 @@ export function invalidateValidation<
   }
 }
 
-export function isThenable(value: unknown): value is PromiseLike<unknown> {
-  return (
-    (typeof value === 'object' && value !== null) || typeof value === 'function'
-  ) && typeof (value as { then?: unknown }).then === 'function'
-}
-
 export function makeInitialValidationStatuses<TValues extends object, TContext extends object>(
   fields: readonly CompiledField<TValues, TContext>[],
 ): Readonly<Record<string, ValidationStatus>> {

@@ -39,6 +39,19 @@ test('copies complete value replacements before exposing them', () => {
   assert.ok(Object.isFrozen(form.values.profile))
 })
 
+test('does not read inherited values through schema paths', () => {
+  const forms = configureForms()
+  const schema = forms.defineSchema<ProfileValues>()([
+    { defaultValue: '', name: 'profile.name' },
+  ])
+  const initialValues = Object.create({
+    profile: { name: 'Inherited' },
+  }) as ProfileValues
+  const form = forms.create(schema, { initialValues })
+
+  assert.equal(form.getValue('profile.name'), '')
+})
+
 test('restores validation status when a validator throws', async () => {
   const forms = configureForms()
   const schema = forms.defineSchema<NameValues>()([
