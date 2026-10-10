@@ -11,6 +11,7 @@
     "headless",
     "schema"
   ],
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -22,26 +23,55 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=18.12.0"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "benchmark": "pnpm run build && tsx benchmark/setValue.ts",
+    "build": "tsx scripts/build.ts",
+    "clean": "tsx scripts/clean.ts",
+    "commitlint": "commitlint --edit",
+    "demo": "pnpm run build && pnpm --dir demo run dev",
+    "demo:build": "pnpm run build && pnpm --dir demo run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "test:runtime": "node --test test/runtime.test.mjs",
+    "lint-staged": "lint-staged",
+    "prepare": "husky",
+    "test:runtime": "vitest run",
+    "test:watch": "vitest",
     "test": "pnpm run build && pnpm run test:runtime",
-    "check": "pnpm run typecheck && pnpm run test"
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm --dir demo run build",
+    "changeset": "changeset",
+    "version": "changeset version && pnpm install --lockfile-only",
+    "release": "pnpm run build && changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "@chanyuxi/eslint-waltz": "1.5.0",
+    "@commitlint/cli": "^21.2.3",
+    "@commitlint/config-conventional": "^21.2.3",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@types/node": "^26.6.4",
+    "@vitest/eslint-plugin": "1.6.27",
     "eslint": "10.10.0",
     "eslint-config-flat-gitignore": "2.4.0",
     "eslint-plugin-import-x": "4.17.1",
     "eslint-plugin-jsonc": "3.4.2",
     "eslint-plugin-perfectionist": "5.11.0",
+    "husky": "^9.1.7",
     "jiti": "2.7.0",
     "jsonc-eslint-parser": "3.3.0",
+    "lint-staged": "^17.6.0",
+    "rollup": "^4.64.3",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "typescript-eslint": "8.70.0"
+    "typescript-eslint": "8.70.0",
+    "vitest": "^5.0.3"
+  },
+  "lint-staged": {
+    "*.{cjs,js,json,jsonc,mjs,ts,tsx}": "eslint --fix"
   },
   "devEngines": {
     "packageManager": {

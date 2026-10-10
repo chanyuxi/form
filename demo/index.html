@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="@chanyuxi/form P0 core demo" />
+    <title>表单内核 P0 Demo</title>
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="intro">
+        <p class="eyebrow">@chanyuxi/form · Demo</p>
+        <h1>一个可观察的表单内核</h1>
+        <p>直接操作无头 Core，观察字段状态、校验结果和快照 revision。</p>
+      </section>
+
+      <section class="demo-grid">
+        <form class="panel form-panel" id="demo-form" novalidate>
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Form controls</p>
+              <h2>交互表单</h2>
+            </div>
+            <span class="revision-badge" id="revision">revision 0</span>
+          </div>
+
+          <label class="field">
+            <span>姓名</span>
+            <input id="name" name="name" autocomplete="name" placeholder="例如：Jason" aria-describedby="name-errors" />
+            <small class="field-error" id="name-errors" aria-live="polite"></small>
+          </label>
+
+          <label class="field">
+            <span>年龄</span>
+            <input id="age" name="age" type="number" min="0" placeholder="例如：28" aria-describedby="age-errors" />
+            <small class="field-error" id="age-errors" aria-live="polite"></small>
+          </label>
+
+          <label class="field context-field">
+            <span>Context：最低年龄</span>
+            <input id="minimum-age" type="number" min="0" value="18" />
+            <small>修改后，已有校验结果会回到 unvalidated。</small>
+          </label>
+
+          <div class="actions">
+            <button type="submit" class="primary">执行 validate()</button>
+            <button type="button" id="fill">事务填充</button>
+            <button type="button" id="manual-error">手动错误</button>
+            <button type="button" id="reset">重置表单</button>
+          </div>
+
+          <p class="result" id="result" aria-live="polite">等待操作</p>
+        </form>
+
+        <section class="panel state-panel" aria-labelledby="state-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Runtime state</p>
+              <h2 id="state-heading">实时快照</h2>
+            </div>
+          </div>
+          <pre id="state-output"></pre>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

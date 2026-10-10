@@ -1,20 +1,22 @@
 import type {
   AnyCoreFieldDefinition,
   CompleteFieldDefinitions,
+  ConfigureFormsOptions,
   CoreSchema,
-  CoreSystem,
   CreateOptions,
   FormInstance,
-} from './types.js'
+  FormSystem,
+} from './types'
 
-import { FormCoreError } from './errors.js'
-import { FormRuntime } from './runtime.js'
-import { compileSchema } from './schema.js'
+import { FormCoreError, formErrorCode } from './formError'
+import { FormRuntime } from './formRuntime'
+import { compileSchema } from './formSchema'
 
-export function createSystem<
+export function configureForms<
   TContext extends object = Record<never, never>,
->(): CoreSystem<TContext> {
+>(config: ConfigureFormsOptions = {}): FormSystem<TContext> {
   const schemas = new WeakMap<object, ReturnType<typeof compileSchema<object, TContext>>>()
+  const onSubscriberError = config.onSubscriberError ?? reportSubscriberError
 
   const defineSchema = <TValues extends object>() => <
     const TFields extends readonly AnyCoreFieldDefinition<TValues, TContext>[],
@@ -36,15 +38,22 @@ export function createSystem<
     const compiled = schemas.get(schema)
     if (compiled === undefined) {
       throw new FormCoreError(
-        'SCHEMA_SYSTEM_MISMATCH',
+        formErrorCode.schemaSystemMismatch,
         'This schema was not created by the current Core System.',
       )
     }
     return new FormRuntime(
       compiled as unknown as ReturnType<typeof compileSchema<TValues, TContext>>,
+      onSubscriberError,
       options,
     )
   }
 
-  return Object.freeze({ create, defineSchema }) as CoreSystem<TContext>
+  return Object.freeze({ create, defineSchema }) as FormSystem<TContext>
+}
+
+function reportSubscriberError(error: AggregateError): void {
+  queueMicrotask(() => {
+    throw error
+  })
 }

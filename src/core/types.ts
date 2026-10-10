@@ -35,13 +35,17 @@ export type FieldPath<TValues> = TValues extends ScalarValue | UnsupportedLeaf
   ? never
   : TValues extends object
     ? {
-        [TKey in Extract<keyof TValues, string>]: NonNullable<TValues[TKey]> extends ScalarValue
+        [TKey in Extract<keyof TValues, string>]: TValues[TKey] extends ScalarValue
           ? TKey
-          : NonNullable<TValues[TKey]> extends UnsupportedLeaf
+          : null extends TValues[TKey]
             ? never
-            : NonNullable<TValues[TKey]> extends object
-              ? JoinPath<TKey, FieldPath<NonNullable<TValues[TKey]>>>
-              : never
+            : undefined extends TValues[TKey]
+              ? never
+              : TValues[TKey] extends UnsupportedLeaf
+                ? never
+                : TValues[TKey] extends object
+                  ? JoinPath<TKey, FieldPath<TValues[TKey]>>
+                  : never
       }[Extract<keyof TValues, string>]
     : never
 
@@ -64,12 +68,10 @@ export interface FormIssue {
 export type FormIssueSource = 'manual' | 'server' | 'submit' | 'validation'
 
 export type ScalarValue
-  = | bigint
-    | boolean
+  = | boolean
     | null
     | number
     | string
-    | symbol
     | undefined
 
 export interface ValidationContext<TValues, TPath extends FieldPath<TValues>, TContext extends object> {
@@ -96,6 +98,11 @@ type JoinPath<TKey extends string, TChild extends string> = `${TKey}.${TChild}`
 type UnsupportedLeaf = ((...args: never[]) => unknown) | Date | readonly unknown[] | RegExp
 
 declare const schemaBrand: unique symbol
+declare const fieldContextBrand: unique symbol
+
+export interface ClearErrorsOptions {
+  readonly source?: FormIssueSource
+}
 
 export type CompleteFieldDefinitions<
   TValues extends object,
@@ -105,24 +112,16 @@ export type CompleteFieldDefinitions<
   ? TFields
   : { readonly __missingFieldPaths__: MissingFieldPaths<TValues, TFields, TContext> } & TFields
 
+export interface ConfigureFormsOptions {
+  readonly onSubscriberError?: (error: AggregateError) => void
+}
+
 export interface CoreSchema<TValues extends object, TContext extends object> {
   readonly fields: readonly AnyCoreFieldDefinition<TValues, TContext>[]
   readonly [schemaBrand]: {
     readonly context: TContext
     readonly values: TValues
   }
-}
-
-export interface CoreSystem<TContext extends object> {
-  create<TValues extends object>(
-    schema: CoreSchema<TValues, TContext>,
-    ...args: CreateArguments<TValues, TContext>
-  ): FormInstance<TValues, TContext>
-  defineSchema<TValues extends object>(): <
-    const TFields extends readonly AnyCoreFieldDefinition<TValues, TContext>[],
-  >(
-    fields: CompleteFieldDefinitions<TValues, TFields, TContext>,
-  ) => CoreSchema<TValues, TContext>
 }
 
 export interface CreateOptions<TValues extends object, TContext extends object> {
@@ -135,12 +134,11 @@ export interface FieldInstance<
   TPath extends FieldPath<TValues>,
   TContext extends object,
 > {
-  clearErrors(): void
-  get(): DeepReadonly<FieldValue<TValues, TPath>>
-  getDefault(): DeepReadonly<FieldValue<TValues, TPath>>
-  getState(): FieldState<TValues, TPath>
-  hasError(): boolean
-  isDirty(): boolean
+  clearErrors(options?: ClearErrorsOptions): void
+  readonly defaultValue: DeepReadonly<FieldValue<TValues, TPath>>
+  readonly [fieldContextBrand]?: TContext
+  readonly hasError: boolean
+  readonly isDirty: boolean
   markTouched(): void
   readonly name: TPath
   reset(): void
@@ -149,6 +147,7 @@ export interface FieldInstance<
   readonly state: FieldState<TValues, TPath>
   subscribe(listener: () => void): () => void
   validate(): Promise<ValidationResult>
+  readonly value: DeepReadonly<FieldValue<TValues, TPath>>
 }
 
 export interface FieldState<TValues extends object, TPath extends FieldPath<TValues>> {
@@ -164,15 +163,13 @@ export interface FieldState<TValues extends object, TPath extends FieldPath<TVal
 }
 
 export interface FormInstance<TValues extends object, TContext extends object> {
-  clearErrors(name?: FieldPath<TValues>): void
+  clearErrors(name?: FieldPath<TValues>, options?: ClearErrorsOptions): void
+  readonly context: DeepReadonly<TContext>
+  readonly defaultValues: DeepReadonly<TValues>
   dispose(): void
-  getContext(): DeepReadonly<TContext>
-  getDefaultValues(): DeepReadonly<TValues>
+  readonly fields: readonly FieldInstance<TValues, FieldPath<TValues>, TContext>[]
   getField<TPath extends FieldPath<TValues>>(name: TPath): FieldInstance<TValues, TPath, TContext>
-  getFields(): readonly FieldInstance<TValues, FieldPath<TValues>, TContext>[]
-  getState(): FormState<TValues>
   getValue<TPath extends FieldPath<TValues>>(name: TPath): DeepReadonly<FieldValue<TValues, TPath>>
-  getValues(): DeepReadonly<TValues>
   hasError(name?: FieldPath<TValues>): boolean
   markTouched<TPath extends FieldPath<TValues>>(name: TPath): void
   patchContext(patch: Partial<TContext>): void
@@ -189,6 +186,7 @@ export interface FormInstance<TValues extends object, TContext extends object> {
   transaction(callback: (transaction: TransactionContext<TValues>) => void): void
   validate(): Promise<ValidationResult>
   validateField<TPath extends FieldPath<TValues>>(name: TPath): Promise<ValidationResult>
+  readonly values: DeepReadonly<TValues>
 }
 
 export interface FormState<TValues extends object> {
@@ -204,6 +202,18 @@ export interface FormState<TValues extends object> {
   readonly values: DeepReadonly<TValues>
 }
 
+export interface FormSystem<TContext extends object> {
+  create<TValues extends object>(
+    schema: CoreSchema<TValues, TContext>,
+    ...args: CreateArguments<TValues, TContext>
+  ): FormInstance<TValues, TContext>
+  defineSchema<TValues extends object>(): <
+    const TFields extends readonly AnyCoreFieldDefinition<TValues, TContext>[],
+  >(
+    fields: CompleteFieldDefinitions<TValues, TFields, TContext>,
+  ) => CoreSchema<TValues, TContext>
+}
+
 export interface ManualIssueInput {
   readonly code: string
   readonly message: string
@@ -216,10 +226,10 @@ export interface ResetOptions<TValues extends object> {
 
 export interface TransactionContext<TValues extends object> {
   getValue<TPath extends FieldPath<TValues>>(name: TPath): DeepReadonly<FieldValue<TValues, TPath>>
-  getValues(): DeepReadonly<TValues>
   patchValues(patch: Partial<TValues>): void
   setValue<TPath extends FieldPath<TValues>>(name: TPath, value: FieldValue<TValues, TPath>): void
   setValues(values: TValues): void
+  readonly values: DeepReadonly<TValues>
 }
 
 export type ValidationResult

@@ -308,7 +308,7 @@ const form = forms.create(profileSchema)
 form.setValue('name', 'Jason')
 form.getField('age').set(28)
 
-const values = form.getValues()
+const values = form.values
 ```
 
 此时无需挂载组件即可读写、校验、重置和提交。来自 UI 系统的实例门面具有呈现能力，但控件只在真正渲染时连接。
@@ -579,12 +579,12 @@ Core 实例的 `schema` 只暴露 Core Definition。UI 实例门面的 `schema` 
 
 ```tsx
 // 由 Control 作者写一次，业务用户反复复用。
-export const TextControl = defineControl<string>()({
+export const TextControl = defineControl<string>({
   defaultValue: '',
   render: TextControlView,
 })
 
-export const NumberControl = defineControl<number | null>()({
+export const NumberControl = defineControl<number | null>({
   defaultValue: null,
   render: NumberControlView,
 })
@@ -1036,7 +1036,7 @@ Form 操作带目标名；Field 已绑定目标，允许较短命名：
 
 ```ts
 form.getValue('name')
-field.get()
+field.value
 ```
 
 重置值且清理元数据统一叫 `resetField` / `field.reset`，不叫含义模糊的 `resetValue`。当前实现范围不同时提供多套等价别名。
@@ -1048,18 +1048,18 @@ field.get()
 
 | API                                    | 语义                                    |
 | -------------------------------------- | ------------------------------------- |
-| `state` / `getState()`                 | 当前已提交的只读快照，不自动建立 React 订阅             |
+| `state`                                | 当前已提交的只读快照，不自动建立 React 订阅             |
 | `schema`                               | 本实例绑定的只读定义；Core 不包含可执行 UI 依赖          |
-| `getValues()` / `getValue(name)`       | 读取当前值，不执行校验或副作用                       |
+| `values` / `getValue(name)`            | 读取完整值或指定字段值，不执行校验或副作用                 |
 | `setValue(name, value, options?)`      | 更新字段值                                 |
 | `setValues(values)`                    | 整体替换当前值；不自动修改默认值基线                    |
 | `patchValues(patch)`                   | 顶层键 patch；嵌套路径使用 `setValue`，不做含糊的递归合并 |
-| `getDefaultValues()`                   | 读取当前默认值基线                             |
+| `defaultValues`                        | 读取当前默认值基线                             |
 | `setDefaultValues(patch)`              | 只修改指定基线，不覆盖当前输入                       |
 | `reset(options?)`                      | 恢复/建立数据基线并清理会话元数据                     |
 | `resetField(name)`                     | 重置该字段及其错误、touched、校验任务                |
-| `getContext()` / `patchContext(patch)` | 读取/更新运行环境；对象属性按显式 patch 更新            |
-| `getFields()` / `getField(name)`       | 字段集合和逻辑句柄                             |
+| `context` / `patchContext(patch)`      | 读取/更新运行环境；对象属性按显式 patch 更新            |
+| `fields` / `getField(name)`            | 字段集合和逻辑句柄                             |
 | `validate()` / `validateField(name)`   | 执行校验，返回有状态的结果                         |
 | `hasError(name?)`                      | 是否存在当前错误，不等价于“已经验证通过”                 |
 | `setError(...)` / `clearErrors(...)`   | 按来源设置/清理问题                            |
@@ -1069,27 +1069,25 @@ field.get()
 | `dispose()`                            | 明确终止实例资源与命令能力                         |
 
 
-`getValues` 和其他快照读取返回只读数据；不得把外部原地修改当成合法更新。写入边界必须防止调用者之后修改同一个数组/对象绕过通知。
+`values` 和其他快照属性返回只读数据；不得把外部原地修改当成合法更新。写入边界必须防止调用者之后修改同一个数组/对象绕过通知。
 
-`getFields()` 返回当前顶层逻辑节点，顺序来自定义；数组条目通过数组句柄枚举。`getField(path)` 在调用时把路径解析为当前逻辑字段，不存在时返回明确的 `FIELD_NOT_FOUND` 错误。需要跨重排持有子字段时使用稳定条目句柄，不反复复用旧索引路径。
+`fields` 返回当前顶层逻辑节点，顺序来自定义；数组条目通过数组句柄枚举。`getField(path)` 在调用时把路径解析为当前逻辑字段，不存在时返回明确的 `FIELD_NOT_FOUND` 错误。需要跨重排持有子字段时使用稳定条目句柄，不反复复用旧索引路径。
 
 ### 9.3 Field API
 
 ```ts
 field.name
 field.state
-field.getState()
-
-field.get()
+field.value
 field.set(value)
 field.set(value, options)
 
-field.getDefault()
+field.defaultValue
 field.setDefault(value)
 field.reset()
 
-field.isDirty()
-field.hasError()
+field.isDirty
+field.hasError
 field.markTouched()
 field.validate()
 field.clearErrors()
@@ -1200,11 +1198,11 @@ initialValues 的显式字段值
 ### 9.8 读写状态与已提交快照
 
 ```ts
-const before = form.getState()
+const before = form.state
 
 form.setValue('name', 'Jason')
 
-const after = form.getState()
+const after = form.state
 ```
 
 如果本次值确实发生变化，`after` 是新快照；没有变化则保留引用。
@@ -1366,7 +1364,7 @@ form.renderField('subscribed', { control: 'switch' })
 
 `renderField` 返回可独立订阅的稳定入口，不依赖父组件重新执行才能看见字段更新。`React.memo` 是减少渲染的手段，不是更新通知机制。
 
-自动布局组件如需遍历字段，必须订阅字段/数组条目集合。仅调用一次 `getFields()` 不构成响应式订阅。
+自动布局组件如需遍历字段，必须订阅字段/数组条目集合。仅读取一次 `fields` 不构成响应式订阅。
 
 ### 10.8 Presentation 注册与渲染执行分离
 
@@ -1444,7 +1442,7 @@ fieldGeneration：
 启动提交后任务
 ```
 
-准备失败不发布半成品状态；订阅回调抛错属于提交后的观察者错误，不能伪装为已提交状态被回滚。
+准备失败不发布半成品状态；订阅回调抛错属于提交后的观察者错误，不能伪装为已提交状态被回滚。Core 会继续通知其他订阅者，写命令保持成功，并把聚合异常交给 `configureForms({ onSubscriberError })` 的独立错误通道。
 
 这里的原子性只指一个 Core 命令的可观察状态，不涵盖网络、浏览器 DOM 或任意用户副作用。
 
@@ -1710,7 +1708,7 @@ const schema = forms.defineSchema(fields, {
 
 这是明确的输出契约，提交回调需要接受相应联合输出类型。
 
-当前实现范围不把“字段隐藏”解释为“从输出自动移除”，也不让 `getValues()` 有时返回少字段却仍声称完整的 `TValues`。
+当前实现范围不把“字段隐藏”解释为“从输出自动移除”，也不让 `values` 有时返回少字段却仍声称完整的 `TValues`。
 
 ### 12.10 独立校验器适配，不是表单引擎对接
 
@@ -2178,7 +2176,7 @@ React 中“把 props 只读入初始状态”会忽略后续变化，官方建�
 
 ```ts
 import {
-  createSystem,
+  configureForms,
   formFeatures,
   cache,
 } from '@chanyuxi/form-core'
@@ -2188,11 +2186,11 @@ interface ProfileValues {
   age: number | null
 }
 
-const core = createSystem({
+const forms = configureForms({
   features: formFeatures([cache()]),
 })
 
-const schema = core.defineSchema<ProfileValues>()([
+const schema = forms.defineSchema<ProfileValues>()([
   {
     name: 'name',
     defaultValue: '',
@@ -2205,7 +2203,7 @@ const schema = core.defineSchema<ProfileValues>()([
   },
 ])
 
-const form = core.create(schema)
+const form = forms.create(schema)
 
 form.setValue('name', 'Jason')
 form.getField('age').set(28)
@@ -2215,7 +2213,7 @@ form.dispose()
 
 此入口不包含 Presentation、Control、`.ui()`、Hook 或组件。字段契约来自显式值模型和运行时定义。独立 value-schema 推导可以作为可选能力，不要求所有用户重复声明模型。
 
-`createSystem` 属于纯 Core 包；框架包的 `configureForms` 在它之上提供适合框架的基础门面。两个入口最终使用同一个 Core Runtime。
+纯 Core 包与框架包统一使用 `configureForms` 命名；框架入口只在同一个 Core Runtime 之上增加订阅、生命周期和可选 Renderer 门面。
 
 ### 16.2 框架基础系统也可手动组合 UI
 
@@ -2277,19 +2275,16 @@ Renderer 可以在自己的定义处理中验证 Control 与 Field，但 Core �
 packages/
   form-core/
     src/
-      create-system.ts
-      schema/
-      runtime/
-      store/
-      transactions/
-      fields/
-      arrays/
-      validation/
-      submission/
-      tasks/
-      features/
-      subscriptions/
-      types/
+      index.ts
+      core/
+        configureForms.ts
+        fieldPath.ts
+        formError.ts
+        formRuntime.ts
+        formSchema.ts
+        types.ts
+        validation.ts
+        valueStore.ts
 
   form-react/
     src/
@@ -2354,7 +2349,7 @@ Vue 等框架可以使用自然的响应式接入，但不能因此拥有第二�
 | 自定义输入控件        | `defineControl` + `.ui({ controls })`                             |
 | 自定义字段外观        | `.ui({ fields, defaultField })`                                   |
 | 自己编写字段 JSX     | 基础系统 + FieldInstance + 字段订阅                                       |
-| 不使用任何框架        | Core `createSystem`                                               |
+| 不使用任何框架        | Core `configureForms`                                             |
 | 独立校验器          | Core 的校验协议                                                        |
 | 通用数据工具         | Core 内部实现选择，不是表单引擎插件                                              |
 
@@ -2418,7 +2413,7 @@ const compactSchema = compactForms.defineSchema(nameFields)
 Control 作者实现一次组件绑定并声明值契约：
 
 ```tsx
-export const TextControl = defineControl<string>()({
+export const TextControl = defineControl<string>({
   defaultValue: '',
   render: TextControlView,
 })

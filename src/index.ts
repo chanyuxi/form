@@ -1,12 +1,11 @@
-export { createSystem } from './create-system.js'
-export { FormCoreError } from './errors.js'
-export type { FormCoreErrorCode } from './errors.js'
+export { configureForms } from './core/configureForms'
+export { FormCoreError, formErrorCode } from './core/formError'
+export type { FormCoreErrorCode } from './core/formError'
 export type {
-  AnyCoreFieldDefinition,
-  CompleteFieldDefinitions,
+  ClearErrorsOptions,
+  ConfigureFormsOptions,
   CoreFieldDefinition,
   CoreSchema,
-  CoreSystem,
   CreateOptions,
   DeepPartial,
   DeepReadonly,
@@ -18,6 +17,7 @@ export type {
   FormIssue,
   FormIssueSource,
   FormState,
+  FormSystem,
   ManualIssueInput,
   ResetOptions,
   ScalarValue,
@@ -27,4 +27,4 @@ export type {
   ValidationResult,
   ValidationStatus,
   ValidationWhenContext,
-} from './types.js'
+} from './core/types'
