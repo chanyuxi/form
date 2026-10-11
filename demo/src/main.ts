@@ -36,6 +36,7 @@ const schema = forms.defineSchema<DemoValues>()([
   },
 ])
 
+debugger
 const form = forms.create(schema, {
   initialContext: { minimumAge: 18 },
 })
@@ -51,26 +52,32 @@ const revision = getElement<HTMLElement>('revision')
 const result = getElement<HTMLElement>('result')
 
 nameInput.addEventListener('input', () => {
+  debugger
   form.setValue('name', nameInput.value)
 })
 nameInput.addEventListener('blur', () => {
+  debugger
   form.markTouched('name')
 })
 
 ageInput.addEventListener('input', () => {
+  debugger
   form.setValue('age', ageInput.value === '' ? null : ageInput.valueAsNumber)
 })
 ageInput.addEventListener('blur', () => {
+  debugger
   form.markTouched('age')
 })
 
 minimumAgeInput.addEventListener('input', () => {
+  debugger
   if (!Number.isNaN(minimumAgeInput.valueAsNumber)) {
     form.patchContext({ minimumAge: minimumAgeInput.valueAsNumber })
   }
 })
 
 formElement.addEventListener('submit', (event) => {
+  debugger
   event.preventDefault()
   void form.submit(async (payload) => {
     await new Promise(resolve => setTimeout(resolve, 300))
@@ -81,6 +88,7 @@ formElement.addEventListener('submit', (event) => {
 })
 
 getElement<HTMLButtonElement>('fill').addEventListener('click', () => {
+  debugger
   form.transaction((transaction) => {
     transaction.setValue('name', 'Jason')
     transaction.setValue('age', 28)
@@ -89,6 +97,7 @@ getElement<HTMLButtonElement>('fill').addEventListener('click', () => {
 })
 
 getElement<HTMLButtonElement>('manual-error').addEventListener('click', () => {
+  debugger
   form.setError('name', {
     code: 'demo',
     message: '这是通过 setError() 写入的手动错误',
@@ -97,6 +106,7 @@ getElement<HTMLButtonElement>('manual-error').addEventListener('click', () => {
 })
 
 getElement<HTMLButtonElement>('reset').addEventListener('click', () => {
+  debugger
   form.reset()
   form.patchContext({ minimumAge: 18 })
   minimumAgeInput.value = '18'
@@ -106,9 +116,10 @@ getElement<HTMLButtonElement>('reset').addEventListener('click', () => {
 console.log(form)
 console.log(form.getField('name'))
 
-const validation = await form.validateField('name')
-console.log(validation)
+// const validation = await form.validateField('name')
+// console.log(validation)
 
+debugger
 const unsubscribe = form.subscribe(render)
 
 window.addEventListener('beforeunload', () => {

@@ -1,3 +1,4 @@
+import type { CommitStateOptions, FormRuntimeState } from './formRuntimeState'
 import type { CompiledField, CompiledSchema } from './formSchema'
 import type {
   ClearErrorsOptions,
@@ -16,8 +17,8 @@ import type {
   SubmitHandler,
   SubmitResult,
   TransactionContext,
+  ValidationMode,
   ValidationResult,
-  ValidationStatus,
 } from './types'
 
 import { isPromiseLike } from '@chanyuxi/utils/async'
@@ -26,10 +27,19 @@ import { getPath } from '@chanyuxi/utils/path'
 
 import { FormCoreError, formErrorCode } from './formError'
 import {
-  aggregateValidationStatus,
+  addIssuePaths,
+  allIssues,
+  createFieldSnapshot,
+  deriveFormSnapshot,
+  fieldSnapshotsEqual,
+  hasObservableChange,
+  hasValidationChange,
+  makeBooleanRecord,
+} from './formRuntimeState'
+import {
   collectIssuePaths,
   collectValidationInvalidationPaths,
-  createValidationIssue,
+  evaluateValidationFields,
   freezeIssue,
   hasValidator,
   indexIssues,
@@ -47,43 +57,22 @@ import {
   valuesEqual,
 } from './valueStore'
 
-interface InternalState<TValues extends object, TContext extends object> {
-  readonly context: TContext
-  readonly defaultValues: TValues
-  readonly formEpoch: number
-  readonly inputsRevision: number
-  readonly isSubmitSuccessful: boolean
-  readonly isSubmitted: boolean
-  readonly isSubmitting: boolean
-  readonly manualIssues: readonly FormIssue[]
-  readonly revision: number
-  readonly submitCount: number
-  readonly touched: Readonly<Record<string, boolean>>
-  readonly validatedFields: ReadonlySet<string>
-  readonly validationIssues: readonly FormIssue[]
-  readonly validationStatuses: Readonly<Record<string, ValidationStatus>>
-  readonly values: TValues
-}
-
-interface PublishHint {
-  readonly dirtyNames?: ReadonlySet<string>
-  readonly fieldNames?: ReadonlySet<string>
-  readonly observableChanged?: boolean
-  readonly validationChanged?: boolean
-}
-
 interface ValidationTicket {
   readonly formEpoch: number
   readonly inputsRevision: number
 }
 
 const emptyIssues: readonly FormIssue[] = Object.freeze([])
+const emptyFieldSelection: ReadonlySet<string> = new Set()
+const validationModes: readonly ValidationMode[] = [
+  'all',
+  'onBlur',
+  'onChange',
+  'onSubmit',
+  'onTouched',
+]
 
-export class FormRuntime<
-  TValues extends object,
-  TContext extends object,
-  TSubmitValues = TValues,
->
+export class FormRuntime<TValues extends object, TContext extends object, TSubmitValues = TValues>
 implements FormInstance<TValues, TContext, TSubmitValues> {
   readonly schema: CoreSchema<TValues, TContext, TSubmitValues>
 
@@ -107,6 +96,7 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     return this.stateValue.values as DeepReadonly<TValues>
   }
 
+  private automaticValidationScheduled = false
   private readonly compiled: CompiledSchema<TValues, TContext, TSubmitValues>
   private dirtyCount = 0
   private disposed = false
@@ -117,14 +107,15 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
   private readonly formListeners = new Set<() => void>()
   private notifying = false
   private readonly onSubscriberError: (error: AggregateError) => void
+  private readonly pendingAutomaticValidationFields = new Set<string>()
   private readonly queuedWrites: (() => void)[] = []
   private snapshotValue: FormState<TValues>
-  private stateValue: InternalState<TValues, TContext>
+  private stateValue: FormRuntimeState<TValues, TContext>
   private submitController: AbortController | undefined
   private readonly subscriberErrors: unknown[] = []
   private transactionActive = false
-
   private readonly validationControllers = new Set<AbortController>()
+  private readonly validationMode: ValidationMode
 
   constructor(
     compiled: CompiledSchema<TValues, TContext, TSubmitValues>,
@@ -134,8 +125,12 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     this.compiled = compiled
     this.onSubscriberError = onSubscriberError
     this.schema = compiled.schema
+    this.validationMode = resolveValidationMode(options?.mode)
 
-    const defaultValues = materializeValues(compiled.fields)
+    const schemaDefaultValues = materializeValues(compiled.fields)
+    const defaultValues = options?.defaultValues === undefined
+      ? schemaDefaultValues
+      : materializeValues(compiled.fields, options.defaultValues, schemaDefaultValues)
     const values = options?.initialValues === undefined
       ? defaultValues
       : materializeValues(compiled.fields, options.initialValues, defaultValues)
@@ -162,15 +157,26 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     }
     const initialIssues = Object.freeze(allIssues(this.stateValue))
     const initialIssuesByPath = indexIssues(initialIssues)
-    this.snapshotValue = this.createFormSnapshot(this.stateValue, initialIssues)
+    const initialSnapshot = deriveFormSnapshot({
+      dirtyFieldsToRecompute: 'all',
+      errors: initialIssues,
+      fieldMap: this.compiled.fieldMap,
+      fields: this.compiled.fields,
+      previous: undefined,
+      previousDirtyCount: 0,
+      state: this.stateValue,
+      validationChanged: true,
+    })
+    this.dirtyCount = initialSnapshot.dirtyCount
+    this.snapshotValue = initialSnapshot.snapshot
 
     for (const field of compiled.fields) {
       const instance = this.createFieldInstance(field.name)
       this.fieldInstances.set(field.name, instance)
       this.fieldSnapshots.set(
         field.name,
-        this.createFieldSnapshot(
-          field.name,
+        createFieldSnapshot(
+          field,
           this.stateValue,
           initialIssuesByPath.get(field.name) ?? emptyIssues,
         ),
@@ -191,19 +197,20 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         const matchesSource = options.source === undefined || issue.source === options.source
         return matchesPath && matchesSource
       }
-      const validationIssues = this.stateValue.validationIssues.filter(issue => !shouldClear(issue))
-      const manualIssues = this.stateValue.manualIssues.filter(issue => !shouldClear(issue))
-      if (
-        validationIssues.length === this.stateValue.validationIssues.length
-        && manualIssues.length === this.stateValue.manualIssues.length
-      ) {
+      const clearedIssues: FormIssue[] = []
+      const keepIssue = (issue: FormIssue) => {
+        if (!shouldClear(issue)) {
+          return true
+        }
+        clearedIssues.push(issue)
+        return false
+      }
+      const validationIssues = this.stateValue.validationIssues.filter(keepIssue)
+      const manualIssues = this.stateValue.manualIssues.filter(keepIssue)
+      if (clearedIssues.length === 0) {
         return
       }
-      const clearedIssues = [
-        ...this.stateValue.validationIssues.filter(shouldClear),
-        ...this.stateValue.manualIssues.filter(shouldClear),
-      ]
-      const fieldNames = collectIssuePaths(clearedIssues)
+      const affectedFields = collectIssuePaths(clearedIssues)
       const validatedFields = new Set(this.stateValue.validatedFields)
       const validationStatuses = { ...this.stateValue.validationStatuses }
       if (options.source === undefined || options.source === 'validation') {
@@ -211,21 +218,21 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
           if (name === undefined || field.name === name) {
             validatedFields.delete(field.name)
             validationStatuses[field.name] = hasValidator(field) ? 'unvalidated' : 'valid'
-            fieldNames.add(field.name)
+            affectedFields.add(field.name)
           }
         }
       }
-      this.publish({
-        ...this.stateValue,
+      const statePatch = {
         manualIssues,
         validatedFields,
         validationIssues,
         validationStatuses,
-      }, {
-        dirtyNames: new Set(),
-        fieldNames,
-        observableChanged: true,
-        validationChanged: true,
+      }
+      this.commitState({
+        assumeChanged: true,
+        dirtyFieldsToRecompute: emptyFieldSelection,
+        fieldSnapshotsToRefresh: affectedFields,
+        statePatch,
       })
     })
   }
@@ -239,20 +246,33 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         return
       }
       this.abortSubmit()
-      if (this.stateValue.isSubmitting) {
-        this.publish({
-          ...this.stateValue,
-          isSubmitSuccessful: false,
-          isSubmitting: false,
-        }, {
-          dirtyNames: new Set(),
-          fieldNames: new Set(),
-          observableChanged: true,
-          validationChanged: false,
-        })
-      }
-      this.disposed = true
       this.abortValidations()
+
+      const affectedFields = new Set<string>()
+      const validatedFields = new Set(this.stateValue.validatedFields)
+      const validationStatuses = { ...this.stateValue.validationStatuses }
+      for (const field of this.compiled.fields) {
+        if (validationStatuses[field.name] === 'validating') {
+          affectedFields.add(field.name)
+          validatedFields.delete(field.name)
+          validationStatuses[field.name] = hasValidator(field) ? 'unvalidated' : 'valid'
+        }
+      }
+
+      const statePatch = {
+        isSubmitSuccessful: this.stateValue.isSubmitting
+          ? false
+          : this.stateValue.isSubmitSuccessful,
+        isSubmitting: false,
+        validatedFields,
+        validationStatuses,
+      }
+      this.commitState({
+        dirtyFieldsToRecompute: emptyFieldSelection,
+        fieldSnapshotsToRefresh: affectedFields,
+        statePatch,
+      })
+      this.disposed = true
       this.formListeners.clear()
       for (const listeners of this.fieldListeners.values()) {
         listeners.clear()
@@ -281,18 +301,18 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     this.ensureDirectWriteAllowed()
     this.executeWrite(() => {
       const field = this.requireField(name)
-      if (this.stateValue.touched[field.name] === true) {
-        return
+      if (this.stateValue.touched[field.name] !== true) {
+        const statePatch = {
+          touched: Object.freeze({ ...this.stateValue.touched, [field.name]: true }),
+        }
+        this.commitState({
+          assumeChanged: true,
+          dirtyFieldsToRecompute: emptyFieldSelection,
+          fieldSnapshotsToRefresh: new Set([field.name]),
+          statePatch,
+        })
       }
-      this.publish({
-        ...this.stateValue,
-        touched: Object.freeze({ ...this.stateValue.touched, [field.name]: true }),
-      }, {
-        dirtyNames: new Set(),
-        fieldNames: new Set([field.name]),
-        observableChanged: true,
-        validationChanged: false,
-      })
+      this.requestAutomaticValidationAfterTouch(field.name)
     })
   }
 
@@ -307,16 +327,17 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         return
       }
       const invalidated = invalidateValidation(this.compiled.fields, this.stateValue)
-      const fieldNames = collectValidationInvalidationPaths(this.stateValue)
-      this.publish({
+      const affectedFields = collectValidationInvalidationPaths(this.stateValue)
+      const statePatch = {
         ...invalidated,
         context: cloneContext(merged as TContext),
         inputsRevision: this.stateValue.inputsRevision + 1,
-      }, {
-        dirtyNames: new Set(),
-        fieldNames,
-        observableChanged: true,
-        validationChanged: fieldNames.size > 0,
+      }
+      this.commitState({
+        assumeChanged: true,
+        dirtyFieldsToRecompute: emptyFieldSelection,
+        fieldSnapshotsToRefresh: affectedFields,
+        statePatch,
       })
     })
   }
@@ -341,8 +362,7 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         ? values
         : this.stateValue.defaultValues
       const inputsChanged = values !== this.stateValue.values
-      const next: InternalState<TValues, TContext> = {
-        ...this.stateValue,
+      const statePatch = {
         defaultValues,
         formEpoch: this.stateValue.formEpoch + 1,
         inputsRevision: this.stateValue.inputsRevision + (inputsChanged ? 1 : 0),
@@ -352,12 +372,16 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         manualIssues: [],
         submitCount: 0,
         touched: makeBooleanRecord(this.compiled.fields, false),
-        validatedFields: new Set(),
+        validatedFields: new Set<string>(),
         validationIssues: [],
         validationStatuses: makeInitialValidationStatuses(this.compiled.fields),
         values,
       }
-      this.publish(next)
+      this.commitState({
+        dirtyFieldsToRecompute: 'all',
+        fieldSnapshotsToRefresh: 'all',
+        statePatch,
+      })
     })
   }
 
@@ -371,18 +395,23 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
       const values = replaceFieldValue(this.compiled, this.stateValue.values, name, defaultValue)
       const touched = { ...this.stateValue.touched, [field.name]: false }
       const invalidated = invalidateValidation(this.compiled.fields, this.stateValue)
-      const fieldNames = collectValidationInvalidationPaths(this.stateValue)
-      fieldNames.add(field.name)
+      const affectedFields = collectValidationInvalidationPaths(this.stateValue)
+      affectedFields.add(field.name)
       const manualIssues = this.stateValue.manualIssues.filter(issue => issue.path !== field.name)
-      const inputsChanged = !valuesEqual(this.compiled.fields, values, this.stateValue.values)
-      this.publish({
+      const inputsChanged = values !== this.stateValue.values
+      const statePatch = {
         ...invalidated,
         formEpoch: this.stateValue.formEpoch + 1,
         inputsRevision: this.stateValue.inputsRevision + (inputsChanged ? 1 : 0),
         manualIssues,
         touched: Object.freeze(touched),
         values,
-      }, { dirtyNames: new Set([field.name]), fieldNames, validationChanged: true })
+      }
+      this.commitState({
+        dirtyFieldsToRecompute: new Set([field.name]),
+        fieldSnapshotsToRefresh: affectedFields,
+        statePatch,
+      })
     })
   }
 
@@ -398,15 +427,13 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         this.stateValue.defaultValues,
         nextDefaults,
       )
-      this.publish(
-        { ...this.stateValue, defaultValues: nextDefaults },
-        {
-          dirtyNames: changedPaths,
-          fieldNames: changedPaths,
-          observableChanged: true,
-          validationChanged: false,
-        },
-      )
+      const statePatch = { defaultValues: nextDefaults }
+      this.commitState({
+        assumeChanged: true,
+        dirtyFieldsToRecompute: changedPaths,
+        fieldSnapshotsToRefresh: changedPaths,
+        statePatch,
+      })
     })
   }
 
@@ -433,15 +460,13 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         return
       }
       const manualIssues = [...this.stateValue.manualIssues.filter(candidate => candidate.id !== id), issue]
-      this.publish(
-        { ...this.stateValue, manualIssues },
-        {
-          dirtyNames: new Set(),
-          fieldNames: new Set([field.name]),
-          observableChanged: true,
-          validationChanged: true,
-        },
-      )
+      const statePatch = { manualIssues }
+      this.commitState({
+        assumeChanged: true,
+        dirtyFieldsToRecompute: emptyFieldSelection,
+        fieldSnapshotsToRefresh: new Set([field.name]),
+        statePatch,
+      })
     })
   }
 
@@ -468,6 +493,7 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     if (this.stateValue.isSubmitting) {
       return { status: 'busy' }
     }
+    this.pendingAutomaticValidationFields.clear()
 
     const ticket: ValidationTicket = {
       formEpoch: this.stateValue.formEpoch,
@@ -478,16 +504,16 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     const controller = new AbortController()
     this.submitController = controller
     this.executeWrite(() => {
-      this.publish({
-        ...this.stateValue,
+      const statePatch = {
         isSubmitSuccessful: false,
         isSubmitting: true,
         submitCount: this.stateValue.submitCount + 1,
-      }, {
-        dirtyNames: new Set(),
-        fieldNames: new Set(),
-        observableChanged: true,
-        validationChanged: false,
+      }
+      this.commitState({
+        assumeChanged: true,
+        dirtyFieldsToRecompute: emptyFieldSelection,
+        fieldSnapshotsToRefresh: emptyFieldSelection,
+        statePatch,
       })
     })
 
@@ -506,7 +532,7 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
         return { status: 'aborted' }
       }
 
-      const beforeTransform = this.submitTicketStatus(ticket, controller)
+      const beforeTransform = this.ticketStatus(ticket, controller.signal)
       if (beforeTransform !== undefined) {
         this.finishSubmit(false, false)
         return { status: beforeTransform }
@@ -524,7 +550,7 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
       }
       const payload = cloneCoreValue(transformed, 'submitValues') as DeepReadonly<TSubmitValues>
 
-      const beforeHandler = this.submitTicketStatus(ticket, controller)
+      const beforeHandler = this.ticketStatus(ticket, controller.signal)
       if (beforeHandler !== undefined) {
         this.finishSubmit(false, false)
         return { status: beforeHandler }
@@ -643,11 +669,14 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
   }
 
   validate(): Promise<ValidationResult> {
+    this.pendingAutomaticValidationFields.clear()
     return this.runValidation(this.compiled.fields)
   }
 
   validateField<TPath extends FieldPath<TValues>>(name: TPath): Promise<ValidationResult> {
-    return this.runValidation([this.requireField(name)])
+    const field = this.requireField(name)
+    this.pendingAutomaticValidationFields.delete(field.name)
+    return this.runValidation([field])
   }
 
   private abortSubmit(): void {
@@ -656,6 +685,7 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
   }
 
   private abortValidations(): void {
+    this.pendingAutomaticValidationFields.clear()
     for (const controller of this.validationControllers) {
       controller.abort()
     }
@@ -672,52 +702,105 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     }
     const valuePaths = changedValuePaths
       ?? findChangedValuePaths(this.compiled.fields, this.stateValue.values, values)
-    const fieldNames = collectValidationInvalidationPaths(this.stateValue)
-    const validationChanged = fieldNames.size > 0
+    const affectedFields = collectValidationInvalidationPaths(this.stateValue)
     for (const path of valuePaths) {
-      fieldNames.add(path)
+      affectedFields.add(path)
     }
     const invalidated = invalidateValidation(this.compiled.fields, this.stateValue)
-    this.publish({
+    const statePatch = {
       ...invalidated,
       inputsRevision: this.stateValue.inputsRevision + 1,
       values,
-    }, {
-      dirtyNames: valuePaths,
-      fieldNames,
-      observableChanged: true,
-      validationChanged,
+    }
+    this.commitState({
+      assumeChanged: true,
+      dirtyFieldsToRecompute: valuePaths,
+      fieldSnapshotsToRefresh: affectedFields,
+      statePatch,
     })
+    this.requestAutomaticValidationAfterChange(valuePaths)
   }
 
-  private createDirtyFields(
-    state: InternalState<TValues, TContext>,
-    previous?: FormState<TValues>,
-    dirtyNames?: ReadonlySet<string>,
-  ): Readonly<Record<FieldPath<TValues>, boolean>> {
-    if (previous === undefined || dirtyNames === undefined) {
-      const dirtyFields = makeDirtyRecord(this.compiled.fields, state.values, state.defaultValues)
-      this.dirtyCount = Object.values(dirtyFields).filter(Boolean).length
-      return dirtyFields
-    }
-    if (dirtyNames.size === 0) {
-      return previous.dirtyFields
+  private commitState(
+    options: CommitStateOptions<TValues, TContext>,
+  ): void {
+    const current = this.stateValue
+    const candidate = { ...current, ...options.statePatch }
+    const observableChanged = options.assumeChanged === true
+      || hasObservableChange(this.compiled.fields, current, candidate)
+    if (!observableChanged) {
+      this.stateValue = { ...candidate, revision: current.revision }
+      return
     }
 
-    const dirtyFields = { ...previous.dirtyFields } as Record<string, boolean>
-    for (const name of dirtyNames) {
-      const field = this.requireField(name)
-      const wasDirty = dirtyFields[field.name] === true
-      const isDirty = !Object.is(
-        getPath(state.values, field.segments),
-        getPath(state.defaultValues, field.segments),
+    const nextState = { ...candidate, revision: current.revision + 1 }
+    const validationChanged = hasValidationChange(current, candidate)
+    const issues = validationChanged
+      ? Object.freeze(allIssues(nextState))
+      : this.snapshotValue.errors
+    let fieldSnapshotsToRefresh = options.fieldSnapshotsToRefresh
+    if (fieldSnapshotsToRefresh !== 'all' && validationChanged) {
+      const affectedFields = new Set(fieldSnapshotsToRefresh)
+      for (const field of this.compiled.fields) {
+        if (current.validationStatuses[field.name] !== candidate.validationStatuses[field.name]) {
+          affectedFields.add(field.name)
+        }
+      }
+      addIssuePaths(affectedFields, current.validationIssues)
+      addIssuePaths(affectedFields, current.manualIssues)
+      addIssuePaths(affectedFields, candidate.validationIssues)
+      addIssuePaths(affectedFields, candidate.manualIssues)
+      fieldSnapshotsToRefresh = affectedFields
+    }
+    const fields = fieldSnapshotsToRefresh === 'all'
+      ? this.compiled.fields
+      : [...fieldSnapshotsToRefresh].map(name => this.requireField(name))
+    const issuesByPath = validationChanged && fields.length > 0
+      ? indexIssues(issues)
+      : undefined
+    const formSnapshot = deriveFormSnapshot({
+      dirtyFieldsToRecompute: options.dirtyFieldsToRecompute,
+      errors: issues,
+      fieldMap: this.compiled.fieldMap,
+      fields: this.compiled.fields,
+      previous: this.snapshotValue,
+      previousDirtyCount: this.dirtyCount,
+      state: nextState,
+      validationChanged,
+    })
+
+    const changedFields: string[] = []
+    const nextFieldSnapshots = new Map<string, FieldState<TValues, FieldPath<TValues>>>()
+    for (const field of fields) {
+      const previous = this.fieldSnapshots.get(field.name)
+      const fieldIssues = validationChanged
+        ? issuesByPath?.get(field.name) ?? emptyIssues
+        : previous?.errors ?? emptyIssues
+      const next = createFieldSnapshot(
+        field,
+        nextState,
+        fieldIssues,
       )
-      dirtyFields[field.name] = isDirty
-      if (wasDirty !== isDirty) {
-        this.dirtyCount += isDirty ? 1 : -1
+      if (previous !== undefined && fieldSnapshotsEqual(previous, next)) {
+        nextFieldSnapshots.set(field.name, previous)
+      }
+      else {
+        nextFieldSnapshots.set(field.name, next)
+        changedFields.push(field.name)
       }
     }
-    return Object.freeze(dirtyFields) as Readonly<Record<FieldPath<TValues>, boolean>>
+
+    this.stateValue = nextState
+    this.dirtyCount = formSnapshot.dirtyCount
+    this.snapshotValue = formSnapshot.snapshot
+    for (const [name, snapshot] of nextFieldSnapshots) {
+      this.fieldSnapshots.set(name, snapshot)
+    }
+
+    this.notify(this.formListeners)
+    for (const name of changedFields) {
+      this.notify(this.fieldListeners.get(name)!)
+    }
   }
 
   private createFieldInstance<TPath extends FieldPath<TValues>>(
@@ -755,64 +838,6 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
       get value() {
         return readValue()
       },
-    })
-  }
-
-  private createFieldSnapshot<TPath extends FieldPath<TValues>>(
-    name: TPath,
-    state: InternalState<TValues, TContext>,
-    errors: readonly FormIssue[],
-  ): FieldState<TValues, TPath> {
-    const field = this.requireField(name)
-    const baseStatus = state.validationStatuses[name] ?? 'unvalidated'
-    const validationStatus = errors.length > 0 ? 'invalid' : baseStatus
-    const value = getPath(state.values, field.segments) as DeepReadonly<FieldValue<TValues, TPath>>
-    const defaultValue = getPath(state.defaultValues, field.segments) as DeepReadonly<
-      FieldValue<TValues, TPath>
-    >
-    return Object.freeze({
-      defaultValue,
-      errors,
-      isDirty: !Object.is(value, defaultValue),
-      isTouched: state.touched[name] === true,
-      isValid: validationStatus === 'valid',
-      isValidating: validationStatus === 'validating',
-      name,
-      validationStatus,
-      value,
-    })
-  }
-
-  private createFormSnapshot(
-    state: InternalState<TValues, TContext>,
-    errors: readonly FormIssue[],
-    previous?: FormState<TValues>,
-    dirtyNames?: ReadonlySet<string>,
-    validationChanged = true,
-  ): FormState<TValues> {
-    const dirtyFields = this.createDirtyFields(state, previous, dirtyNames)
-    const validationStatus = previous !== undefined && !validationChanged
-      ? previous.validationStatus
-      : aggregateValidationStatus(
-          this.compiled.fields,
-          state.validationStatuses,
-          errors,
-        )
-    return Object.freeze({
-      defaultValues: state.defaultValues as DeepReadonly<TValues>,
-      dirtyFields,
-      errors,
-      isDirty: this.dirtyCount > 0,
-      isSubmitSuccessful: state.isSubmitSuccessful,
-      isSubmitted: state.isSubmitted,
-      isSubmitting: state.isSubmitting,
-      isValid: validationStatus === 'valid',
-      isValidating: validationStatus === 'validating',
-      revision: state.revision,
-      submitCount: state.submitCount,
-      touchedFields: state.touched as Readonly<Record<FieldPath<TValues>, boolean>>,
-      validationStatus,
-      values: state.values as DeepReadonly<TValues>,
     })
   }
 
@@ -857,16 +882,16 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
       return
     }
     this.executeWrite(() => {
-      this.publish({
-        ...this.stateValue,
+      const statePatch = {
         isSubmitSuccessful: successful,
         isSubmitted: submitted || this.stateValue.isSubmitted,
         isSubmitting: false,
-      }, {
-        dirtyNames: new Set(),
-        fieldNames: new Set(),
-        observableChanged: true,
-        validationChanged: false,
+      }
+      this.commitState({
+        assumeChanged: true,
+        dirtyFieldsToRecompute: emptyFieldSelection,
+        fieldSnapshotsToRefresh: emptyFieldSelection,
+        statePatch,
       })
     })
   }
@@ -893,54 +918,33 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     }
   }
 
-  private publish(
-    candidate: InternalState<TValues, TContext>,
-    hint: PublishHint = {},
-  ): void {
-    const observableChanged = hint.observableChanged
-      ?? hasObservableChange(this.compiled.fields, this.stateValue, candidate)
-    if (!observableChanged) {
-      this.stateValue = { ...candidate, revision: this.stateValue.revision }
+  private queueAutomaticValidation(fieldNames: Iterable<string>): void {
+    for (const name of fieldNames) {
+      this.pendingAutomaticValidationFields.add(name)
+    }
+    if (
+      this.automaticValidationScheduled
+      || this.pendingAutomaticValidationFields.size === 0
+    ) {
       return
     }
 
-    this.stateValue = { ...candidate, revision: this.stateValue.revision + 1 }
-    const issues = hint.validationChanged === false
-      ? this.snapshotValue.errors
-      : Object.freeze(allIssues(this.stateValue))
-    const issuesByPath = indexIssues(issues)
-    this.snapshotValue = this.createFormSnapshot(
-      this.stateValue,
-      issues,
-      this.snapshotValue,
-      hint.dirtyNames,
-      hint.validationChanged,
-    )
-
-    const changedFields: string[] = []
-    const fields = hint.fieldNames === undefined
-      ? this.compiled.fields
-      : [...hint.fieldNames].map(name => this.requireField(name))
-    for (const field of fields) {
-      const next = this.createFieldSnapshot(
-        field.name,
-        this.stateValue,
-        issuesByPath.get(field.name) ?? emptyIssues,
-      )
-      const previous = this.fieldSnapshots.get(field.name)
-      if (previous !== undefined && fieldSnapshotsEqual(previous, next)) {
-        this.fieldSnapshots.set(field.name, previous)
+    this.automaticValidationScheduled = true
+    queueMicrotask(() => {
+      this.automaticValidationScheduled = false
+      if (this.disposed || this.pendingAutomaticValidationFields.size === 0) {
+        this.pendingAutomaticValidationFields.clear()
+        return
       }
-      else {
-        this.fieldSnapshots.set(field.name, next)
-        changedFields.push(field.name)
-      }
-    }
 
-    this.notify(this.formListeners)
-    for (const name of changedFields) {
-      this.notify(this.fieldListeners.get(name)!)
-    }
+      const fields = [...this.pendingAutomaticValidationFields].map(name => this.requireField(name))
+      this.pendingAutomaticValidationFields.clear()
+      void this.runValidation(fields).catch((error: unknown) => {
+        queueMicrotask(() => {
+          throw error
+        })
+      })
+    })
   }
 
   private reportSubscriberError(error: AggregateError): void {
@@ -951,6 +955,28 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
       queueMicrotask(() => {
         throw reportingError
       })
+    }
+  }
+
+  private requestAutomaticValidationAfterChange(fieldNames: ReadonlySet<string>): void {
+    if (this.validationMode === 'all' || this.validationMode === 'onChange') {
+      this.queueAutomaticValidation(fieldNames)
+      return
+    }
+    if (this.validationMode === 'onTouched') {
+      this.queueAutomaticValidation(
+        [...fieldNames].filter(name => this.stateValue.touched[name] === true),
+      )
+    }
+  }
+
+  private requestAutomaticValidationAfterTouch(fieldName: string): void {
+    if (
+      this.validationMode === 'all'
+      || this.validationMode === 'onBlur'
+      || this.validationMode === 'onTouched'
+    ) {
+      this.queueAutomaticValidation([fieldName])
     }
   }
 
@@ -969,6 +995,7 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     fields: readonly CompiledField<TValues, TContext>[],
   ): Promise<ValidationResult> {
     this.ensureWritable()
+    const names = new Set(fields.map(field => field.name))
     const ticket: ValidationTicket = {
       formEpoch: this.stateValue.formEpoch,
       inputsRevision: this.stateValue.inputsRevision,
@@ -979,97 +1006,71 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     try {
       this.executeWrite(() => {
         const statuses = { ...this.stateValue.validationStatuses }
-        const names = new Set(fields.map(field => field.name))
         const validatedFields = new Set(this.stateValue.validatedFields)
         for (const field of fields) {
-          statuses[field.name] = hasValidator(field) ? 'validating' : 'valid'
-          if (hasValidator(field)) {
+          const fieldHasValidator = hasValidator(field)
+          statuses[field.name] = fieldHasValidator ? 'validating' : 'valid'
+          if (fieldHasValidator) {
             validatedFields.add(field.name)
           }
         }
-        this.publish({
-          ...this.stateValue,
+        const statePatch = {
           validatedFields,
           validationIssues: this.stateValue.validationIssues.filter(
             issue => !names.has(issue.path as FieldPath<TValues>),
           ),
           validationStatuses: statuses,
-        }, { dirtyNames: new Set(), fieldNames: names, validationChanged: true })
+        }
+        this.commitState({
+          dirtyFieldsToRecompute: emptyFieldSelection,
+          fieldSnapshotsToRefresh: names,
+          statePatch,
+        })
       })
 
       await Promise.resolve()
-      const invalid = this.validationTicketStatus(ticket)
+      const invalid = this.ticketStatus(ticket)
       if (invalid !== undefined) {
-        return invalid
+        return { status: invalid }
       }
 
-      const values = this.stateValue.values
-      const context = this.stateValue.context
-      const nextIssues: FormIssue[] = []
-      const statuses = { ...this.stateValue.validationStatuses }
+      const evaluated = evaluateValidationFields({
+        context: this.stateValue.context,
+        fields,
+        signal: controller.signal,
+        statuses: this.stateValue.validationStatuses,
+        values: this.stateValue.values,
+      })
 
-      for (const field of fields) {
-        const definition = field.definition
-        const shouldValidate = definition.validateWhen?.({
-          context: context as never,
-          values: values as never,
-        }) ?? true
-
-        if (!shouldValidate || definition.validate === undefined) {
-          statuses[field.name] = 'valid'
-          continue
-        }
-
-        const output = definition.validate({
-          context: context as never,
-          signal: controller.signal,
-          value: getPath(values, field.segments) as never,
-          values: values as never,
-        })
-        if (isPromiseLike(output)) {
-          throw new FormCoreError(
-            formErrorCode.asyncValidationUnsupported,
-            `Field "${field.name}" returned a Promise from its P0 validator.`,
-          )
-        }
-        if (!Array.isArray(output)) {
-          throw new FormCoreError(
-            formErrorCode.invalidValue,
-            `Field "${field.name}" validator must return an issue array.`,
-          )
-        }
-
-        const fieldIssues = output.map((issue, index) => createValidationIssue(field.name, issue, index))
-        nextIssues.push(...fieldIssues)
-        statuses[field.name] = fieldIssues.length === 0 ? 'valid' : 'invalid'
-      }
-
-      const afterRules = this.validationTicketStatus(ticket)
+      const afterRules = this.ticketStatus(ticket)
       if (afterRules !== undefined) {
-        return afterRules
+        return { status: afterRules }
       }
 
       this.executeWrite(() => {
-        const targetNames = new Set(fields.map(field => field.name))
         const untouched = this.stateValue.validationIssues.filter(
-          issue => !targetNames.has(issue.path as FieldPath<TValues>),
+          issue => !names.has(issue.path as FieldPath<TValues>),
         )
-        this.publish({
-          ...this.stateValue,
-          validationIssues: [...untouched, ...nextIssues],
-          validationStatuses: statuses,
-        }, { dirtyNames: new Set(), fieldNames: targetNames, validationChanged: true })
+        const statePatch = {
+          validationIssues: [...untouched, ...evaluated.issues],
+          validationStatuses: evaluated.statuses,
+        }
+        this.commitState({
+          dirtyFieldsToRecompute: emptyFieldSelection,
+          fieldSnapshotsToRefresh: names,
+          statePatch,
+        })
       })
 
       const issues = allIssues(this.stateValue).filter(issue =>
-        fields.some(field => field.name === issue.path),
+        issue.path !== undefined && names.has(issue.path as FieldPath<TValues>),
       )
       return issues.length === 0
         ? { inputsRevision: ticket.inputsRevision, issues: [], status: 'valid' }
         : { inputsRevision: ticket.inputsRevision, issues, status: 'invalid' }
     }
     catch (error) {
-      if (this.validationTicketStatus(ticket) === undefined) {
+      if (this.ticketStatus(ticket) === undefined) {
         this.executeWrite(() => {
           const statuses = { ...this.stateValue.validationStatuses }
           const validatedFields = new Set(this.stateValue.validatedFields)
@@ -1077,14 +1078,12 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
             validatedFields.delete(field.name)
             statuses[field.name] = hasValidator(field) ? 'unvalidated' : 'valid'
           }
-          this.publish(
-            { ...this.stateValue, validatedFields, validationStatuses: statuses },
-            {
-              dirtyNames: new Set(),
-              fieldNames: new Set(fields.map(field => field.name)),
-              validationChanged: true,
-            },
-          )
+          const statePatch = { validatedFields, validationStatuses: statuses }
+          this.commitState({
+            dirtyFieldsToRecompute: emptyFieldSelection,
+            fieldSnapshotsToRefresh: names,
+            statePatch,
+          })
         })
       }
       throw error
@@ -1104,33 +1103,14 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
       if (nextDefaults === this.stateValue.defaultValues) {
         return
       }
-      this.publish(
-        { ...this.stateValue, defaultValues: nextDefaults },
-        {
-          dirtyNames: new Set([name]),
-          fieldNames: new Set([name]),
-          observableChanged: true,
-          validationChanged: false,
-        },
-      )
+      const statePatch = { defaultValues: nextDefaults }
+      this.commitState({
+        assumeChanged: true,
+        dirtyFieldsToRecompute: new Set([name]),
+        fieldSnapshotsToRefresh: new Set([name]),
+        statePatch,
+      })
     })
-  }
-
-  private submitTicketStatus(
-    ticket: ValidationTicket,
-    controller: AbortController,
-  ): 'aborted' | 'stale' | undefined {
-    if (
-      controller.signal.aborted
-      || this.disposed
-      || this.stateValue.formEpoch !== ticket.formEpoch
-    ) {
-      return 'aborted'
-    }
-    if (this.stateValue.inputsRevision !== ticket.inputsRevision) {
-      return 'stale'
-    }
-    return undefined
   }
 
   private subscribeField<TPath extends FieldPath<TValues>>(name: TPath, listener: () => void): () => void {
@@ -1147,88 +1127,33 @@ implements FormInstance<TValues, TContext, TSubmitValues> {
     }
   }
 
-  private validationTicketStatus(ticket: ValidationTicket): undefined | ValidationResult {
-    if (this.disposed || this.stateValue.formEpoch !== ticket.formEpoch) {
-      return { status: 'aborted' }
+  private ticketStatus(
+    ticket: ValidationTicket,
+    signal?: AbortSignal,
+  ): 'aborted' | 'stale' | undefined {
+    if (
+      signal?.aborted === true
+      || this.disposed
+      || this.stateValue.formEpoch !== ticket.formEpoch
+    ) {
+      return 'aborted'
     }
     if (this.stateValue.inputsRevision !== ticket.inputsRevision) {
-      return { status: 'stale' }
+      return 'stale'
     }
     return undefined
   }
 }
 
-function allIssues<TValues extends object, TContext extends object>(
-  state: InternalState<TValues, TContext>,
-): readonly FormIssue[] {
-  return [...state.validationIssues, ...state.manualIssues]
-}
-
-function fieldSnapshotsEqual<TValues extends object, TPath extends FieldPath<TValues>>(
-  left: FieldState<TValues, TPath>,
-  right: FieldState<TValues, TPath>,
-): boolean {
-  return Object.is(left.value, right.value)
-    && Object.is(left.defaultValue, right.defaultValue)
-    && left.isDirty === right.isDirty
-    && left.isTouched === right.isTouched
-    && left.validationStatus === right.validationStatus
-    && issuesEqual(left.errors, right.errors)
-}
-
-function hasObservableChange<TValues extends object, TContext extends object>(
-  fields: readonly CompiledField<TValues, TContext>[],
-  current: InternalState<TValues, TContext>,
-  candidate: InternalState<TValues, TContext>,
-): boolean {
-  return !valuesEqual(fields, current.values, candidate.values)
-    || !valuesEqual(fields, current.defaultValues, candidate.defaultValues)
-    || current.context !== candidate.context
-    || current.isSubmitted !== candidate.isSubmitted
-    || current.isSubmitting !== candidate.isSubmitting
-    || current.isSubmitSuccessful !== candidate.isSubmitSuccessful
-    || current.submitCount !== candidate.submitCount
-    || !recordsEqual(current.touched, candidate.touched)
-    || !recordsEqual(current.validationStatuses, candidate.validationStatuses)
-    || !issuesEqual(current.validationIssues, candidate.validationIssues)
-    || !issuesEqual(current.manualIssues, candidate.manualIssues)
-}
-
-function issuesEqual(left: readonly FormIssue[], right: readonly FormIssue[]): boolean {
-  return left.length === right.length && left.every((issue, index) => {
-    const candidate = right[index]
-    return candidate !== undefined
-      && issue.id === candidate.id
-      && issue.path === candidate.path
-      && issue.code === candidate.code
-      && issue.message === candidate.message
-      && issue.source === candidate.source
-  })
-}
-
-function makeBooleanRecord<TValues extends object, TContext extends object>(
-  fields: readonly CompiledField<TValues, TContext>[],
-  value: boolean,
-): Readonly<Record<string, boolean>> {
-  return Object.freeze(Object.fromEntries(fields.map(field => [field.name, value])))
-}
-
-function makeDirtyRecord<TValues extends object, TContext extends object>(
-  fields: readonly CompiledField<TValues, TContext>[],
-  values: TValues,
-  defaults: TValues,
-): Readonly<Record<FieldPath<TValues>, boolean>> {
-  return Object.freeze(Object.fromEntries(fields.map(field => [
-    field.name,
-    !Object.is(getPath(values, field.segments), getPath(defaults, field.segments)),
-  ]))) as Readonly<Record<FieldPath<TValues>, boolean>>
-}
-
-function recordsEqual<TValue>(
-  left: Readonly<Record<string, TValue>>,
-  right: Readonly<Record<string, TValue>>,
-): boolean {
-  const leftKeys = Object.keys(left)
-  const rightKeys = Object.keys(right)
-  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.is(left[key], right[key]))
+function resolveValidationMode(value: unknown): ValidationMode {
+  if (value === undefined) {
+    return 'onSubmit'
+  }
+  if (!validationModes.includes(value as ValidationMode)) {
+    throw new FormCoreError(
+      formErrorCode.invalidValue,
+      `Validation mode must be one of: ${validationModes.join(', ')}.`,
+    )
+  }
+  return value as ValidationMode
 }

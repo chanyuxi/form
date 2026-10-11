@@ -21,6 +21,7 @@
   "include": [
     "src/**/*.ts",
     "benchmark/**/*.ts",
+    "rollup.config.ts",
     "scripts/**/*.ts",
     "test/**/*.ts",
     "vitest.config.ts"

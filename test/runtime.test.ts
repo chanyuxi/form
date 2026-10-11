@@ -1,4 +1,4 @@
-import type { ConfigureFormsOptions } from '@chanyuxi/form'
+import type { ConfigureFormsOptions, ValidationMode } from '@chanyuxi/form'
 
 import assert from 'node:assert/strict'
 
@@ -26,6 +26,12 @@ interface ValidationValues {
 const hasErrorCode = (code: string) => (error: unknown): boolean =>
   error instanceof FormCoreError && error.code === code
 
+async function flushAutomaticValidation(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
 function makeForms(options?: ConfigureFormsOptions) {
   const forms = configureForms(options)
   const schema = forms.defineSchema<TestValues>()([
@@ -47,6 +53,14 @@ test('creates isolated forms and applies partial initial values over defaults', 
     age: null,
     name: 'Ada',
   })
+  assert.deepEqual(first.defaultValues, {
+    address: { city: '', zip: 0 },
+    age: null,
+    name: '',
+  })
+  assert.equal(first.state.isDirty, true)
+  assert.equal(first.state.dirtyFields.name, true)
+  assert.equal(first.state.dirtyFields['address.city'], true)
   assert.deepEqual(second.values, {
     address: { city: '', zip: 0 },
     age: null,
@@ -64,6 +78,40 @@ test('creates isolated forms and applies partial initial values over defaults', 
   assert.ok(Object.isFrozen(first.state.errors))
   assert.ok(Object.isFrozen(first.values))
   assert.ok(Object.isFrozen(first.values.address))
+})
+
+test('keeps instance default values separate from initial current values', () => {
+  const { forms, schema } = makeForms()
+  const form = forms.create(schema, {
+    defaultValues: { address: { city: 'Paris' }, name: 'baseline' },
+    initialValues: { name: 'current' },
+  })
+
+  assert.deepEqual(form.defaultValues, {
+    address: { city: 'Paris', zip: 0 },
+    age: null,
+    name: 'baseline',
+  })
+  assert.deepEqual(form.values, {
+    address: { city: 'Paris', zip: 0 },
+    age: null,
+    name: 'current',
+  })
+  assert.equal(form.state.dirtyFields.name, true)
+  assert.equal(form.state.dirtyFields['address.city'], false)
+
+  form.reset()
+  assert.deepEqual(form.values, form.defaultValues)
+  assert.equal(form.state.isDirty, false)
+})
+
+test('rejects an unknown validation mode at runtime', () => {
+  const { forms, schema } = makeForms()
+
+  assert.throws(
+    () => forms.create(schema, { mode: 'sometimes' as never }),
+    hasErrorCode(formErrorCode.invalidValue),
+  )
 })
 
 test('rejects schemas from another system', () => {
@@ -309,6 +357,90 @@ test('copies plain context data and rejects unsupported mutable instances', () =
     () => forms.create(schema, { initialContext: { createdAt: new Date() } }),
     hasErrorCode(formErrorCode.invalidValue),
   )
+})
+
+test('defaults automatic validation to onSubmit', async () => {
+  let calls = 0
+  const forms = configureForms()
+  const schema = forms.defineSchema<NameValues>()([
+    {
+      defaultValue: '',
+      name: 'name',
+      validate: () => {
+        calls += 1
+        return []
+      },
+    },
+  ])
+  const form = forms.create(schema)
+
+  form.setValue('name', 'Ada')
+  form.markTouched('name')
+  await flushAutomaticValidation()
+  assert.equal(calls, 0)
+
+  const result = await form.submit(() => undefined)
+  assert.equal(result.status, 'success')
+  assert.equal(calls, 1)
+})
+
+test('maps validation modes to change and touch interactions', async () => {
+  const createForm = (mode: ValidationMode) => {
+    let calls = 0
+    const forms = configureForms()
+    const schema = forms.defineSchema<NameValues>()([
+      {
+        defaultValue: '',
+        name: 'name',
+        validate: () => {
+          calls += 1
+          return []
+        },
+      },
+    ])
+    return {
+      calls: () => calls,
+      form: forms.create(schema, { mode }),
+    }
+  }
+
+  const onChange = createForm('onChange')
+  onChange.form.markTouched('name')
+  await flushAutomaticValidation()
+  assert.equal(onChange.calls(), 0)
+  onChange.form.setValue('name', 'change')
+  await flushAutomaticValidation()
+  assert.equal(onChange.calls(), 1)
+
+  const onBlur = createForm('onBlur')
+  onBlur.form.setValue('name', 'change')
+  await flushAutomaticValidation()
+  assert.equal(onBlur.calls(), 0)
+  onBlur.form.markTouched('name')
+  await flushAutomaticValidation()
+  assert.equal(onBlur.calls(), 1)
+  onBlur.form.markTouched('name')
+  await flushAutomaticValidation()
+  assert.equal(onBlur.calls(), 2)
+
+  const onTouched = createForm('onTouched')
+  onTouched.form.setValue('name', 'before-touch')
+  await flushAutomaticValidation()
+  assert.equal(onTouched.calls(), 0)
+  onTouched.form.markTouched('name')
+  await flushAutomaticValidation()
+  assert.equal(onTouched.calls(), 1)
+  onTouched.form.setValue('name', 'after-touch')
+  await flushAutomaticValidation()
+  assert.equal(onTouched.calls(), 2)
+
+  const all = createForm('all')
+  all.form.setValue('name', 'change')
+  await flushAutomaticValidation()
+  assert.equal(all.calls(), 1)
+  all.form.markTouched('name')
+  await flushAutomaticValidation()
+  assert.equal(all.calls(), 2)
 })
 
 test('runs explicit validation, respects validateWhen, and preserves manual errors on input', async () => {

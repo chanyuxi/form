@@ -1,4 +1,4 @@
-import type { FieldPath, FieldValue, FormState } from '../src/index'
+import type { FieldPath, FieldValue, FormState, ValidationMode } from '../src/index'
 
 import { configureForms } from '../src/index'
 
@@ -75,9 +75,14 @@ const schema = forms.defineSchema<ProfileValues>()([
 ])
 
 const form = forms.create(schema, {
+  defaultValues: { name: 'Default name' },
   initialContext: { minimumAge: 18 },
   initialValues: { address: { city: 'Shanghai' } },
+  mode: 'onTouched',
 })
+
+const validationMode: ValidationMode = 'onSubmit'
+void validationMode
 
 form.setValue('name', 'Jason')
 form.setValue('age', 28)
@@ -113,6 +118,12 @@ form.clearErrors('name', { source: 'custom' })
 
 // @ts-expect-error context is required for non-empty context models
 forms.create(schema)
+
+// @ts-expect-error validation mode is a closed protocol
+forms.create(schema, { initialContext: { minimumAge: 18 }, mode: 'sometimes' })
+
+// @ts-expect-error default values must match the values model
+forms.create(schema, { defaultValues: { age: 'wrong' }, initialContext: { minimumAge: 18 } })
 
 const baseForms = configureForms()
 

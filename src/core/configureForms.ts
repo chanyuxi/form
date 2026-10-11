@@ -13,6 +13,16 @@ import { FormCoreError, formErrorCode } from './formError'
 import { FormRuntime } from './formRuntime'
 import { compileSchema } from './formSchema'
 
+/**
+ * Creates an isolated form system for one shared context model.
+ *
+ * @remarks Schemas are owned by the system that defines them. Passing a schema
+ * to another system's `create` method throws `SCHEMA_SYSTEM_MISMATCH`.
+ *
+ * @typeParam TContext - Context shared by every schema created by this system.
+ * @param config - Optional subscriber error handling configuration.
+ * @returns A system that can define schemas and create independent form instances.
+ */
 export function configureForms<
   TContext extends object = Record<never, never>,
 >(config: ConfigureFormsOptions = {}): FormSystem<TContext> {

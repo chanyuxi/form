@@ -70,6 +70,44 @@ test('restores validation status when a validator throws', async () => {
   assert.equal(form.getField('name').state.validationStatus, 'unvalidated')
 })
 
+test('keeps form and field validating state consistent when errors already exist', async () => {
+  const forms = configureForms()
+  const schema = forms.defineSchema<NameValues>()([
+    { defaultValue: '', name: 'name', validate: () => [] },
+  ])
+  const form = forms.create(schema)
+  form.setError('name', { code: 'manual', message: 'Manual issue' })
+
+  const validation = form.validateField('name')
+
+  assert.equal(form.state.validationStatus, 'validating')
+  assert.equal(form.state.isValidating, true)
+  assert.equal(form.getField('name').state.validationStatus, 'validating')
+  assert.equal(form.getField('name').state.isValidating, true)
+
+  assert.equal((await validation).status, 'invalid')
+  assert.equal(form.getField('name').state.validationStatus, 'invalid')
+})
+
+test('dispose aborts active validation without leaving a validating snapshot', async () => {
+  const forms = configureForms()
+  const schema = forms.defineSchema<NameValues>()([
+    { defaultValue: '', name: 'name', validate: () => [] },
+  ])
+  const form = forms.create(schema)
+
+  const validation = form.validate()
+  assert.equal(form.state.validationStatus, 'validating')
+
+  form.dispose()
+
+  assert.deepEqual(await validation, { status: 'aborted' })
+  assert.equal(form.state.validationStatus, 'unvalidated')
+  assert.equal(form.state.isValidating, false)
+  assert.equal(form.getField('name').state.validationStatus, 'unvalidated')
+  assert.equal(form.getField('name').state.isValidating, false)
+})
+
 test('resetField aborts a form validation without leaving sibling fields validating', async () => {
   const forms = configureForms()
   const schema = forms.defineSchema<FirstSecondValues>()([

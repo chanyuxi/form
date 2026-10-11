@@ -1,6 +1,7 @@
 # `·Form：无头表单内核与内建 Renderer
 
-> **状态：** 设计提案。本文规定目标 API 与行为契约，不表示实现、类型推导或性能已经验证。  
+> **文档状态：** 设计提案。本文规定完整目标 API 与行为契约，不表示所有阶段已经实现。
+> **实现状态：** P0 Core 已进入验收收口；当前证据与限制见 [`P0_ACCEPTANCE.md`](./P0_ACCEPTANCE.md)。
 > **日期：** 2026-10-09  
 > **包命名：** `@chanyuxi/form-`*。工程目录和包边界用于说明职责，不要求所有模块分别发布。
 
@@ -1171,14 +1172,25 @@ isDirty = 当前值与当前默认值基线不同
 
 ### 9.7 默认值与 reset 的确定语义
 
-初始化每个字段按以下优先级合成值，并以最终值建立初始基线：
+初始化分成“默认值基线”和“当前值”两个阶段，二者不能混为一谈。
+
+默认值基线按以下优先级合成：
 
 ```text
-initialValues 的显式字段值
+CreateOptions.defaultValues 的显式字段值
     > 字段 defaultValue/createDefault
     > Control/值描述的默认值
     > 缺失错误，或值契约明确允许的 undefined
 ```
+
+当前值再按以下优先级合成：
+
+```text
+CreateOptions.initialValues 的显式字段值
+    > 已合成的默认值基线
+```
+
+`initialValues` 只描述实例创建时的当前值，不隐式改写 `defaultValues`。因此两者不同的字段创建后立即为 dirty；省略 `initialValues` 时，当前值直接采用默认值基线。
 
 缺失判断使用属性是否存在，不把 `0`、`false`、`''`、`null` 当作缺失。
 
@@ -1543,14 +1555,23 @@ validate: ({ value, context }) => {
 
 ### 12.2 校验器与触发策略分开
 
-默认策略：
+`CreateOptions.mode` 只决定自动触发时机；显式 `validate()`、`validateField()` 与 `submit()` 始终可以执行校验。当前 Core 支持：
 
-- 初始创建不自动执行具有异步行为的校验。
-- 默认第一次在 submit 或显式 validate 时执行。
-- 首次提交尝试后，值变化触发重新校验；是否采用 `onBlur` 等模式属于显式选项。
-- 当前实现范围在任意 values/context 变化后，可保守使所有相关校验结果过期，避免漏掉跨字段依赖。
+| mode | 当前 Core 语义 |
+| --- | --- |
+| `onSubmit` | 默认值；仅提交自动校验 |
+| `onChange` | 字段当前值变化后校验该字段 |
+| `onBlur` | `markTouched(name)` 时校验该字段；UI 适配层把 blur 映射到该命令 |
+| `onTouched` | 第一次 `markTouched(name)` 时校验；之后该 touched 字段的值变化也校验 |
+| `all` | 同时采用 `onChange` 与 `onBlur` |
+
+补充约束：
+
+- 初始创建不自动执行校验。
+- 同一同步写入批次触发的字段校验在微任务中合并。
+- 当前 Core 没有 `reValidateMode`；提交之后的自动触发仍由 `mode` 决定，不能把第三方库的二阶段策略隐式混入 `mode`。
+- 任意 values/context 变化后，可保守使所有相关校验结果过期，避免旧结果继续宣称 `isValid === true`；自动重新执行仍只遵循上表。
 - 没有验证器的字段视为已满足自身校验；整表验证器仍独立计算。
-- 验证结果过期时不能继续宣称 `isValid === true`。
 
 `hasError() === false` 仅说明没有当前有效错误，不代表所有规则已经执行。
 

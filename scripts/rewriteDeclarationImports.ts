@@ -1,7 +1,15 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
-export async function rewriteDeclarationImports(directory: string): Promise<void> {
+const directory = process.argv[2]
+
+if (directory === undefined) {
+  throw new Error('Expected the declaration output directory.')
+}
+
+await rewriteDeclarationImports(resolve(directory))
+
+async function rewriteDeclarationImports(directory: string): Promise<void> {
   const entries = await readdir(directory, { withFileTypes: true })
 
   await Promise.all(entries.map(async (entry) => {

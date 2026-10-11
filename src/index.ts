@@ -29,6 +29,7 @@ export type {
   TransactionContext,
   ValidationContext,
   ValidationIssueInput,
+  ValidationMode,
   ValidationResult,
   ValidationStatus,
   ValidationWhenContext,
